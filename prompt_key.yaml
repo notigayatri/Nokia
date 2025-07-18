@@ -1,0 +1,404 @@
+# This file defines common testing environments and the "prompt keys"
+# (questions/information) to ask the user for each step.
+#
+# Format:
+# ENVIRONMENT_NAME:
+#   - key: [unique_key_name]
+#     description: [The question to ask the user]
+#     type: [string, integer, boolean, enum, json_string, file_path, key_value_pairs]
+#     options: [only for enum type]
+#     example: [example input]
+
+# ========== WEB UI TESTING ==========
+WEB_UI_TESTING:
+  - key: base_url
+    description: What is the base URL of the web application?
+    type: string
+    example: https://www.example.com
+
+  - key: login_success_redirect_url
+    description: Expected URL after successful login
+    type: string
+    example: /dashboard
+
+  - key: common_element_identifiers
+    description: Common CSS selectors or XPaths for UI elements (for LLM context)
+    type: key_value_pairs
+    example: |
+      login_button: '#loginBtn'
+      username_field: 'input[name="username"]'
+      error_message_div: '.error-message'
+
+  - key: browser_type
+    description: Which browser should be used for testing?
+    type: enum
+    options: [chrome, firefox, edge, headless_chrome, safari]
+    example: chrome
+
+  - key: element_locator_strategy
+    description: What is the preferred element locator strategy?
+    type: enum
+    options: [CSS selector, XPath, ID, class name, name, link text, partial link text, tag name, Accessibility ID]
+    example: CSS selector
+
+  - key: element_locator_value
+    description: For a specific element, what is its exact locator value?
+    type: string
+    example: input#username
+
+  - key: input_value
+    description: What text should be entered into the field?
+    type: string
+    example: testuser123
+
+  - key: expected_text_on_page
+    description: What text is expected to be visible on the page?
+    type: string
+    example: Welcome back!
+
+  - key: expected_url_path
+    description: What is the expected URL path after an action (e.g., /dashboard)?
+    type: string
+    example: /dashboard
+
+  - key: screenshot_on_fail
+    description: Should a screenshot be taken on failure for this step?
+    type: boolean
+    example: Yes
+
+  - key: wait_condition
+    description: Any specific wait condition and timeout (e.g., element_is_visible, input#submit, 10)?
+    type: string
+    example: element_is_visible, input#submit, 10
+
+  - key: ui_automation_library
+    description: Which UI automation library should be used?
+    type: enum
+    options: [Selenium, Playwright, Puppeteer, Cypress]
+    example: Selenium
+
+# ========== API TESTING ==========
+API_TESTING:
+  - key: api_base_url
+    description: Base URL for the API
+    type: string
+    example: https://api.example.com/v1
+
+  - key: typical_success_response_200
+    description: Example JSON for a typical 200 OK API response
+    type: json_string
+    example: |
+      {
+        "status": "success",
+        "data": {
+          "id": "UUID_placeholder",
+          "name": "string_placeholder",
+          "created_at": "datetime_placeholder"
+        }
+      }
+
+  - key: typical_error_response_400
+    description: Example JSON for a typical 400 Bad Request API error
+    type: json_string
+    example: |
+      {
+        "error": {
+          "code": 400,
+          "message": "Invalid input provided.",
+          "details": [
+            {"field": "email", "issue": "Invalid format"}
+          ]
+        }
+      }
+
+  - key: required_headers
+    description: Common HTTP headers required for API requests
+    type: key_value_pairs
+    example: |
+      Content-Type: application/json
+      Accept: application/json
+      Authorization: Bearer <TOKEN>
+
+  - key: base_api_url
+    description: What is the base URL for the API endpoints?
+    type: string
+    example: http://localhost:8080/api/v1
+
+  - key: http_method
+    description: What is the HTTP method?
+    type: enum
+    options: [GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS]
+    example: GET
+
+  - key: endpoint_path
+    description: What is the specific API endpoint path?
+    type: string
+    example: /users/1
+
+  - key: headers
+    description: Any specific request headers?
+    type: key_value_pairs
+    example: Content-Type:application/json
+
+  - key: request_body_format
+    description: What is the format of the request body?
+    type: enum
+    options: [JSON, XML, form-urlencoded, multipart/form-data, none]
+    example: JSON
+
+  - key: request_body_content
+    description: What is the exact content of the request body?
+    type: json_string
+    example: '{ "name": "Test User", "email": "test@example.com" }'
+
+  - key: expected_status_code
+    description: What is the expected HTTP status code?
+    type: integer
+    example: 200
+
+  - key: expected_response_json_path
+    description: JSONPath to the expected value in the response
+    type: string
+    example: $.data.user.name
+
+  - key: expected_response_value
+    description: Expected value at the specified JSONPath
+    type: string
+    example: John Doe
+
+  - key: validation_schema_path
+    description: Path to a JSON/XML schema file for response validation
+    type: file_path
+    example: schemas/user_schema.json
+
+  - key: authentication_method
+    description: How to authenticate and where credentials are stored?
+    type: string
+    example: Bearer Token from ENV_VAR_API_TOKEN
+
+  - key: api_client_library
+    description: Which API client library to use?
+    type: enum
+    options: [requests, OkHttp, http.client, axios, go-resty, net/http]
+    example: requests
+
+# ========== CLI TESTING ==========
+CLI_TESTING:
+  - key: exact_command
+    description: What is the precise command to execute?
+    type: string
+    example: ls -l /tmp
+
+  - key: expected_stdout_content
+    description: Expected text or regex in standard output
+    type: string
+    example: "total 0"
+
+  - key: expected_stderr_content
+    description: Expected text or regex in standard error
+    type: string
+    example: ""
+
+  - key: expected_exit_code
+    description: Expected exit code
+    type: integer
+    example: 0
+
+  - key: working_directory
+    description: Directory in which the command should be executed
+    type: string
+    example: /usr/local/bin
+
+  - key: environment_variables
+    description: Environment variables to set
+    type: key_value_pairs
+    example: MY_VAR=value,DEBUG=true
+
+  - key: timeout_seconds
+    description: Maximum time in seconds to wait for command completion
+    type: integer
+    example: 30
+
+  - key: execution_library
+    description: Which library to use for command execution
+    type: enum
+    options: [subprocess, os/exec, ProcessBuilder]
+    example: subprocess
+
+# ========== DATABASE TESTING ==========
+DATABASE_TESTING:
+  - key: db_type
+    description: What type of database?
+    type: enum
+    options: [PostgreSQL, MySQL, MongoDB, SQL Server, SQLite, Oracle]
+    example: PostgreSQL
+
+  - key: connection_string_details
+    description: Database host, port, username, password, and database name
+    type: string
+    example: localhost:5432,myuser,mypass,mydatabase
+
+  - key: query_type
+    description: Type of operation
+    type: enum
+    options: [SELECT, INSERT, UPDATE, DELETE, raw_query, execute_script]
+    example: SELECT
+
+  - key: table_name
+    description: Table being affected or queried
+    type: string
+    example: users
+
+  - key: columns_to_insert
+    description: Column-value pairs for INSERT (as JSON string)
+    type: json_string
+    example: '{ "name": "NewUser", "email": "new@example.com" }'
+
+  - key: where_clause
+    description: Conditions for SELECT, UPDATE, or DELETE
+    type: string
+    example: status = 'active'
+
+  - key: expected_row_count
+    description: Expected number of rows returned or affected
+    type: integer
+    example: 1
+
+  - key: expected_column_value
+    description: Expected value for a specific column
+    type: string
+    example: email:test@example.com
+
+  - key: database_library
+    description: Database client library to use
+    type: enum
+    options: [psycopg2, sqlalchemy, go-sql-driver/mysql, mongo-driver, JDBC, sqlite3]
+    example: psycopg2
+
+# ========== KUBERNETES TESTING ==========
+KUBERNETES_TESTING:
+  - key: kubeconfig_path
+    description: Path to the kubectl config file
+    type: file_path
+    example: ~/.kube/config
+
+  - key: default_namespace
+    description: Default Kubernetes namespace for operations
+    type: string
+    example: default
+
+  - key: pod_status_json_example
+    description: Example output for 'kubectl get pod -o json'
+    type: json_string
+    example: |
+      {
+        "apiVersion": "v1",
+        "items": [
+          {
+            "metadata": {"name": "my-pod-abc", "labels": {"app": "flask-api"}},
+            "status": {"phase": "Running", "containerStatuses": [{"ready": true, "started": true}]}
+          }
+        ],
+        "kind": "List"
+      }
+
+  - key: service_status_json_example
+    description: Example output for 'kubectl get svc -o json'
+    type: json_string
+    example: |
+      {
+        "apiVersion": "v1",
+        "items": [
+          {
+            "metadata": {"name": "my-service"},
+            "spec": {"ports": [{"port": 80}]},
+            "status": {"loadBalancer": {"ingress": [{"ip": "192.168.49.2"}]}}
+          }
+        ]
+      }
+
+  - key: cluster_context_name
+    description: Kubernetes context name to use
+    type: string
+    example: minikube
+
+  - key: resource_type
+    description: Kubernetes resource type
+    type: enum
+    options: [pod, deployment, service, ingress, namespace, configmap, secret, pvc]
+    example: pod
+
+  - key: resource_name
+    description: Name of the Kubernetes resource
+    type: string
+    example: my-nginx-deployment
+
+  - key: namespace
+    description: Kubernetes namespace
+    type: string
+    example: default
+
+  - key: kubectl_command_suffix
+    description: Additional kubectl flags
+    type: string
+    example: --all-namespaces
+
+  - key: expected_status_field
+    description: Status field to check
+    type: string
+    example: status.phase
+
+  - key: expected_status_value
+    description: Expected value for the status field
+    type: string
+    example: Running
+
+  - key: yaml_file_path
+    description: Path to a Kubernetes manifest file
+    type: file_path
+    example: k8s/nginx-deployment.yaml
+
+  - key: kubernetes_client_library
+    description: Kubernetes client library to use
+    type: enum
+    options: [kubernetes-client/python, client-go, fabric8io/kubernetes-client]
+    example: kubernetes-client/python
+
+  - key: check_logs_for_string
+    description: Expected string to find in logs
+    type: string
+    example: "Application started successfully"
+
+# ========== GENERAL ==========
+GENERAL:
+  - key: setup_script_path
+    description: Path to a pre-test setup script
+    type: file_path
+    example: scripts/setup_env.sh
+
+  - key: teardown_script_path
+    description: Path to a post-test teardown script
+    type: file_path
+    example: scripts/cleanup_data.py
+
+  - key: logging_level
+    description: Desired logging level for the step
+    type: enum
+    options: [INFO, DEBUG, WARNING, ERROR]
+    example: INFO
+
+  - key: failure_handling
+    description: How to handle failure for this step
+    type: enum
+    options: [continue_on_fail, fail_fast, retry_n_times]
+    example: retry_n_times:3
+
+  - key: output_variable_name
+    description: If this step generates an output, what variable name to assign?
+    type: string
+    example: user_id
+
+  - key: specific_error_message
+    description: Expected error message for negative scenarios
+    type: string
+    example: "User not found"

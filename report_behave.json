@@ -1,0 +1,73 @@
+[
+{
+  "elements": [
+    {
+      "keyword": "Scenario",
+      "location": "features/pod.feature:3",
+      "name": "Check if the pod is in Running state",
+      "status": "passed",
+      "steps": [
+        {
+          "keyword": "Given",
+          "location": "features/pod.feature:4",
+          "match": {
+            "arguments": [],
+            "location": "features/steps/step_definitions.py:11"
+          },
+          "name": "the mini Kube cluster is accessible",
+          "result": {
+            "duration": 0.8471016883850098,
+            "status": "passed"
+          },
+          "step_type": "given"
+        },
+        {
+          "keyword": "When",
+          "location": "features/pod.feature:5",
+          "match": {
+            "arguments": [
+              {
+                "name": "label",
+                "value": "\"app=flask-api\""
+              }
+            ],
+            "location": "features/steps/step_definitions.py:22"
+          },
+          "name": "I check the status of the pod with label \"app=flask-api\"",
+          "result": {
+            "duration": 0.18985652923583984,
+            "status": "passed"
+          },
+          "step_type": "when"
+        },
+        {
+          "keyword": "Then",
+          "location": "features/pod.feature:6",
+          "match": {
+            "arguments": [
+              {
+                "name": "status",
+                "value": "\"Running\""
+              }
+            ],
+            "location": "features/steps/step_definitions.py:28"
+          },
+          "name": "the pod status should be \"Running\"",
+          "result": {
+            "duration": 0.0,
+            "status": "passed"
+          },
+          "step_type": "then"
+        }
+      ],
+      "tags": [],
+      "type": "scenario"
+    }
+  ],
+  "keyword": "Feature",
+  "location": "features/pod.feature:1",
+  "name": "Pod health check",
+  "status": "passed",
+  "tags": []
+}
+]

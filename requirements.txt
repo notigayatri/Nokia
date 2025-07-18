@@ -1,0 +1,50 @@
+#YAML Ain’t Markup Language
+
+# Everytime you restart the computer, you need to run this command
+minikube start
+
+#verify that minikube is running
+minikube status
+
+#To login to the docker
+docker login
+
+#switching between docker and minikube
+& minikube -p minikube docker-env | Invoke-Expression
+
+#To check the docker images
+docker images
+
+#To check the pods
+kubectl get pods
+
+#To check the services
+kubectl get services 
+
+#To delete the deployment
+kubectl delete deployment flask-api-deployment
+
+#For deploying the application
+kubectl apply -f flask-deployment.yaml
+kubectl apply -f flask-service.yaml
+
+#To check the deployment
+kubectl get deployments
+
+#To change the port from minikube to localhost
+kubectl port-forward service/flask-api-service 5000:80
+
+#To view the application
+http://localhost:5000
+
+#To get service url
+minikube service flask-api-service
+
+#he tunnel for all services using type NodePort or LoadBalancer.
+minikube tunnel
+
+#Together ai api key
+823d00b2b3a446e844f7f3797493e794e7e5e65d9e41845b7b50271de98dc9cb
+
+# To set the Together AI API key as an environment variable through the terminal
+export TOGETHER_API_KEY=823d00b2b3a446e844f7f3797493e794e7e5e65d9e41845b7b50271de98dc9cb
