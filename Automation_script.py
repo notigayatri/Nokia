@@ -1,6 +1,9 @@
 import os
 import re
 import json
+import ast
+import time
+import tempfile
 import subprocess
 from pathlib import Path
 from pathlib import Path
@@ -167,6 +170,7 @@ Feature file:
             temperature=0.2
         )
         env_guess = response.choices[0].message.content.strip().upper()
+        time.sleep(1)
 
         print(f"Inferred Environment: {env_guess}")
         return env_guess
@@ -214,6 +218,7 @@ Only return valid YAML.
                 temperature=0.3
             )
             new_yaml_str = response.choices[0].message.content
+            time.sleep(1)
 
             # Load newly generated keys from LLM output
             new_env_data = yaml.safe_load(new_yaml_str)
@@ -361,9 +366,14 @@ def parse_feature_by_scenario(feature_content: str):
 
 FRAMEWORK_LOGIC_PROMPTS = {
     "behave": Template("""
-You are an expert test automation engineer. Your task is to implement the body of a test function for a given Gherkin step, considering the context of the entire scenario.
+You are an expert test automation engineer. Your task is to implement the body of a test function for a given Gherkin step, considering the context of the entire scenario and the full feature.
 
-**Current Gherkin Step to implement:** "{{ step_text }}"
+**Full Gherkin Feature:**
+---
+{{ full_feature_content }}
+---
+
+**Current Gherkin Step to implement:** "{{ step_line }}"
 **Full Gherkin Scenario:**
 ---
 {{ scenario_content }}
@@ -388,7 +398,11 @@ Contextual details provided by user:
 8.  **Do NOT use prompt inputs directly in your code.**
 9. Interact with the environment (API, CLI, etc.) using the runtime data, not examples.
 10. **Always validate and sanitize all input/output and do not create redundant steps that are already there in previous steps.**
-11.The parameters provided (e.g., {{ parameters }}) will be sanitized by the framework/generated code to remove surrounding quotes. Do NOT apply .strip('"') or similar sanitization to them within the function body, as this will be handled automatically.
+11. The parameters provided (e.g., {{ parameters }}) will be sanitized by the framework/generated code to remove surrounding quotes. Do NOT apply .strip('"') or similar sanitization to them within the function body, as this will be handled automatically.
+{% if previous_step_error %}
+Previous attempt for this step failed with this error. Please fix:
+{{ previous_step_error }}
+{% endif %}
 ---
 Please provide the correct code for the function body now:
 """),
@@ -396,7 +410,12 @@ Please provide the correct code for the function body now:
     "godog": Template("""
 You are a Go test automation expert using Godog BDD. Write only the **function body** for the step below.
 
-**Gherkin Step:** "{{ step_text }}"
+**Full Gherkin Feature:**
+---
+{{ full_feature_content }}
+---
+
+**Gherkin Step:** "{{ step_line }}"
 **Scenario Context:**
 {{ scenario_content }}
 
@@ -409,26 +428,34 @@ Extra context: {{ prompt_inputs }}
 ---
 
 **INSTRUCTIONS:**
-1. Return **only the Go code** – no markdown, comments, function signature, or step decorator.
+1. Return **only the raw Go code** – **no markdown code fences (e.g., ```go), no comments, no function signature, and no step decorator.**
 2. This function is a method on `*scenarioContext`: `func (s *scenarioContext) StepName(ctx context.Context, ...) error`.
 3. Use `s.` to **store/retrieve** shared state. Example: `s.podJson = value` or `val := s.podJson`.
 4. Do **not** use `ctx.Context(...)` for state. `ctx` is for cancellation/timeouts only.
-5. List all inferred `scenarioContext` fields **after imports** like:
-   - `podStatusJson map[string]interface{}`
-   - `clusterContext string`
-6. Use/import packages as needed: `os/exec`, `encoding/json`, etc.
+5. **List all necessary Go `import` statements** at the very top of your response, each on a new line, like `import "os/exec"` or `import "encoding/json"`.
+6. **Immediately after the imports, declare any necessary shared variables as fields within the `scenarioContext` struct that your code uses. Provide the field name and its Go type, one per line.** For example:
+    `podStatusJson map[string]interface{}`
+    `clusterContext string`
+    `minikubeStatus string`
 7. Validate outputs/JSON before using.
 8. Do **not** hardcode static data or sanitize parameters—they're already clean.
-
+{% if previous_step_error %}
+Previous attempt for this step failed with this error. Please fix:
+{{ previous_step_error }}
+{% endif %}
 Output only the raw Go code body.
 """),
 
     "cucumber": Template("""
 You are a test automation engineer writing Cucumber (Java) step definitions. Implement the code inside a `@Given`, `@When`, or `@Then` method for the provided step.
 
-**Step:** "{{ step_text }}"
-**Scenario:** 
+**Full Gherkin Feature:**
 ---
+{{ full_feature_content }}
+---
+
+**Step:** "{{ step_line }}"
+**Scenario:** ---
 {{ scenario_content }}
 ---
 
@@ -442,7 +469,7 @@ User context:
 ---
 **INSTRUCTIONS:**
 1.  **Return only the method body.** No annotations, no method signature.
-2.  **Do NOT include comments or markdown.**
+2.  **Do NOT include comments or markdown code fences (e.g., ```java).**
 3.  Use exact parameter names: {{ parameters }}.
 4.  Interact using Java code — for example, using RestAssured, Selenium, or Java ProcessBuilder.
 5.  Use static/shared variables for state transfer if needed.
@@ -450,6 +477,10 @@ User context:
 7.  Add imports like `import io.restassured.RestAssured;` if used.
 8.  Validate runtime output before comparing or asserting.
 9.  Do not access the `prompt_inputs` directly in code — they are for structure understanding only.
+{% if previous_step_error %}
+Previous attempt for this step failed with this error. Please fix:
+{{ previous_step_error }}
+{% endif %}
 ---
 Write the Cucumber Java method body now:
 """)
@@ -458,12 +489,14 @@ Write the Cucumber Java method body now:
 def extract_context_vars_from_logic(logic: str) -> set:
     return set(re.findall(r"context\.([a-zA-Z_][a-zA-Z0-9_]*)", logic))
 
-def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, environment: str, scenario_content: str) -> dict:
+def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, environment: str, scenario_content: str, full_feature_content: str, previous_step_error: str = None) -> dict:
 
-    # Step keyword and body
     step_keyword_match = re.match(r'^(Given|When|Then|And|But)\s+(.*)', step_text, flags=re.IGNORECASE)
-    gherkin_keyword = step_keyword_match.group(1).lower() if step_keyword_match else 'given'
+    if not step_keyword_match:
+        raise ValueError(f"Invalid Gherkin step: {step_text}")
 
+    gherkin_keyword = step_keyword_match.group(1).lower()
+    
     # Generate framework-specific step text + parameters
     formatted_step_text, parameters = format_step_for_framework(step_text, framework)
 
@@ -480,12 +513,15 @@ def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, 
     prompt_template = FRAMEWORK_LOGIC_PROMPTS[framework]
 
     logic_prompt = prompt_template.render(
-        step_text=step_text,
+        full_feature_content=full_feature_content, # New: Pass full feature content
+        step_line=step_text, # New: Pass the original step line
+        step_text=formatted_step_text, # This is the regex pattern for the step
         scenario_content=scenario_content,
         parameters=parameters,
         parameter_values=parameter_values,
         environment=environment,
-        prompt_inputs=json.dumps(prompt_inputs, indent=2)
+        prompt_inputs=json.dumps(prompt_inputs, indent=2),
+        previous_step_error=previous_step_error # New: Pass previous error for this step
     )
 
     try:
@@ -496,6 +532,7 @@ def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, 
             temperature=0.4 # Keep temperature low for deterministic code
         )
         raw_llm_output = response.choices[0].message.content.strip()
+        time.sleep(1)  # Add a delay between requests
 
         # --- Aggressive Cleaning of LLM Output ---
         # 1. Remove Markdown code fences (both start and end, and language specifier)
@@ -561,7 +598,7 @@ def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, 
         print(f"[LLM Error] Failed to generate logic for step: {step_text}\nDetails: {e}")
         return None
 
-def generate_framework_code(all_step_metadata, framework, custom_imports, step_mappings):
+def generate_framework_code(all_step_metadata, framework, custom_imports, scenario_context_fields):
     if framework == "behave":
         return behave_template.render(
             step_imports=custom_imports,
@@ -591,7 +628,7 @@ def generate_framework_code(all_step_metadata, framework, custom_imports, step_m
                 }
                 for step in all_step_metadata
             ],
-            step_mappings=step_mappings
+            scenario_context_fields=scenario_context_fields
         )
 
     elif framework == "cucumber":
@@ -643,7 +680,11 @@ def write_code(framework, feature_content, code, feature_filename):
 
     return feature_path
 
-def final_llm_autocorrect_code(feature_content: str, step_code: str, framework: str) -> str:
+def final_llm_autocorrect_code(feature_content: str, step_code: str, framework: str, previous_error: str = None) -> str:
+    """
+    Calls the LLM to review and autocorrect the generated step code.
+    Optionally includes a previous error message for the LLM to fix.
+    """
     prompt = f"""
 You are an expert in test automation and {framework.upper()} BDD frameworks.
 
@@ -653,7 +694,7 @@ Your job is to:
 - Review the step definition file and ensure every step aligns correctly with the feature file.
 - Automatically fix any runtime issues (e.g., using `json.loads` on a dict).
 - Ensure consistent use of parameters, context/state (e.g., `context` or `ctx`), imports, function bodies, etc.
-- Do not include explanation or markdown(eg.```python or ```go or ```javascript). Just return the corrected file and do not change anything unless it is wrong.
+- **Do not include explanation or markdown code fences (e.g., ```python, ```go, ```javascript).** Just return the corrected file and do not change anything unless it is wrong.
 - If you cannot fix it, return the original code without changes.
 ---
 
@@ -665,6 +706,9 @@ Feature File:
 Step Definitions File:
 {step_code}
 """
+    # This is the crucial part that was missing or incorrect:
+    if previous_error:
+        prompt += f"\n\n⚠️ Previous validation failed with this error. Please fix:\n{previous_error}"
 
     try:
         response = together_client.chat.completions.create(
@@ -672,10 +716,89 @@ Step Definitions File:
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
+        time.sleep(1) # Added sleep to help with rate limits
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[ERROR] Final LLM correction failed: {e}")
         return step_code  # Return original if LLM fails
+
+def validate_code(code, framework):
+    try:
+        if framework == 'behave': # Python validation
+            # Validate syntax using AST
+            ast.parse(code)
+            return True, None
+
+        elif framework == 'godog': # Go validation
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".go", mode='w') as temp_file:
+                temp_file.write(code)
+                temp_file_path = temp_file.name
+
+            # Run `go fmt` to check for formatting issues and potential syntax errors
+            # A non-zero exit code or stdout indicates issues
+            fmt_result = subprocess.run(["gofmt", "-l", temp_file_path],
+                                         capture_output=True, text=True)
+            if fmt_result.returncode != 0 or fmt_result.stdout.strip():
+                os.remove(temp_file_path)
+                return False, f"Go formatting or syntax error detected by gofmt: {fmt_result.stderr.strip() or fmt_result.stdout.strip()}"
+
+            # Run `go vet` for static analysis (common errors, suspicious constructs)
+            vet_result = subprocess.run(["go", "vet", temp_file_path],
+                                         capture_output=True, text=True)
+            if vet_result.returncode != 0:
+                os.remove(temp_file_path)
+                return False, f"Go static analysis error detected by go vet: {vet_result.stderr.strip()}"
+
+            # Run `go build` to check for compilation errors
+            # This is the most definitive check for Go code validity
+            build_result = subprocess.run(["go", "build", "-o", os.devnull, temp_file_path],
+                                           capture_output=True, text=True)
+            if build_result.returncode != 0:
+                os.remove(temp_file_path)
+                return False, f"Go compilation error detected by go build: {build_result.stderr.strip()}"
+
+            os.remove(temp_file_path) # Clean up temporary file
+            return True, None
+
+        elif framework == 'cucumber': # Java validation (RESTORED CORRECT LOGIC)
+            # For Java, validation is more complex as it involves compilation.
+            # We'll need to write the code to a temporary project structure and try to compile.
+            with tempfile.TemporaryDirectory() as temp_dir:
+                base_path = Path(temp_dir)
+                stepdefs_dir = base_path / "src/test/java/stepdefinitions"
+                runner_dir = base_path / "src/test/java/runner"
+                features_dir = base_path / "src/test/resources/features"
+
+                stepdefs_dir.mkdir(parents=True, exist_ok=True)
+                runner_dir.mkdir(parents=True, exist_ok=True)
+                features_dir.mkdir(parents=True, exist_ok=True)
+
+                # Write the step definitions file
+                (stepdefs_dir / "StepDefinitions.java").write_text(code)
+                # Write a minimal runner and pom.xml for compilation
+                # These templates are assumed to be defined globally or passed in
+                (runner_dir / "TestRunner.java").write_text(cucumber_runner_template.render())
+                (base_path / "pom.xml").write_text(pom_template.render())
+                # A dummy feature file might be needed for compilation to succeed
+                (features_dir / "temp.feature").write_text("Feature: Temp\n  Scenario: Temp\n    Given a temp step")
+
+
+                # Try to compile the Java code using Maven
+                # `mvn compile` will check syntax and dependencies
+                compile_result = subprocess.run(["mvn", "compile"], cwd=base_path, capture_output=True, text=True, shell=True)
+                
+                if compile_result.returncode != 0:
+                    return False, f"Java compilation error detected by Maven: {compile_result.stderr.strip()}"
+            
+            return True, None
+
+        else:
+            # This 'else' block should now only be hit if an truly unsupported framework is chosen
+            return False, f"Unsupported framework: {framework}"
+
+    except Exception as e:
+        return False, f"An unexpected error occurred during validation: {str(e)}"
+
 
 # --- Main Execution Controller ---
 def main():
@@ -706,7 +829,8 @@ def main():
     scenarios_data = parse_feature_by_scenario(feature_content)
     
     all_step_metadata = []
-    all_custom_imports = []
+    all_custom_imports = set()
+    all_godog_fields = set()  # For Godog, track scenario context fields
     
     for scenario in scenarios_data:
         print(f"\nProcessing Scenario: {scenario['title']}")
@@ -721,7 +845,9 @@ def main():
                 framework=framework,
                 prompt_inputs=prompt_inputs_with_context,
                 environment=environment,
-                scenario_content=scenario["content"]
+                scenario_content=scenario["content"],
+                full_feature_content=feature_content, # Pass full feature content
+                previous_step_error=None # No per-step retry currently, so always None
             )
 
             if step_data is None:
@@ -729,27 +855,66 @@ def main():
                 continue
 
             # Update known context vars from logic
-            used_vars = extract_context_vars_from_logic(step_data["logic"])
+            if framework == "behave":
+                used_vars = extract_context_vars_from_logic(step_data["logic"])
+            elif framework == "godog":
+                used_vars = set(re.findall(r"s\.([a-zA-Z_][a-zA-Z0-9_]*)", step_data["logic"]))
+                if "scenario_context_fields" in step_data:
+                    for field_decl in step_data["scenario_context_fields"]:
+                        all_godog_fields.add(field_decl)
+            else: # Cucumber/Java
+                used_vars = set()
+
             for var in used_vars:
                 if var not in available_context_vars:
                     available_context_vars[var] = "Dynamically created from previous step"
 
             all_step_metadata.append(step_data)
-            all_custom_imports.extend(step_data.get("imports", []))
+            all_custom_imports.update(step_data.get("imports", []))
 
 
-    # Step 6: Generate code via Jinja
-    step_imports = sorted(set(all_custom_imports))
-    code = generate_framework_code(
-        all_step_metadata=all_step_metadata,
-        framework=framework,
-        custom_imports=step_imports,
-        step_mappings=[]
-    )
-    code = final_llm_autocorrect_code(feature_content, code, framework)
+    # Step 5 & 6 (Combined): Generate and Validate Code with Retry
+    final_generated_code = None
+    is_valid_code = False
+    validation_error_message = None # Initialize to None
 
+    for attempt in range(3):
+        print(f"\nAttempt {attempt+1} to generate and validate final code...")
+
+        # Generate the framework code from collected step metadata
+        # This is the initial rendering of the template
+        code_to_autocorrect = generate_framework_code(
+            all_step_metadata=all_step_metadata,
+            framework=framework,
+            custom_imports=sorted(list(all_custom_imports)),
+            scenario_context_fields=sorted(list(all_godog_fields))
+        )
+
+        # Call the final LLM autocorrection on the generated code
+        # Pass the previous error message if any
+        final_generated_code = final_llm_autocorrect_code(
+            feature_content=feature_content,
+            step_code=code_to_autocorrect, # Pass the code generated from the template
+            framework=framework,
+            previous_error=validation_error_message # Pass the error from the previous attempt
+        )
+
+        # Validate the final code
+        is_valid_code, validation_error_message = validate_code(final_generated_code, framework)
+
+        if is_valid_code:
+            print(f"Code validated successfully on attempt {attempt+1}.")
+            break # Exit the retry loop
+        else:
+            print(f"Attempt {attempt+1}: Validation failed with error:\n{validation_error_message}")
+            # The `validation_error_message` is already set for the next iteration.
+
+    if not is_valid_code:
+        print("Final code validation failed after multiple attempts. Exiting.")
+        return
+    
     # Step 7: Write to file
-    write_code(framework, feature_content, code, Path(feature_file_path).name)
+    write_code(framework, feature_content, final_generated_code, Path(feature_file_path).name)
 
     # Step 8: Run tests
     print(f"Running {framework} tests...")
