@@ -2,6 +2,7 @@ import os
 import re
 import json
 import ast
+from dotenv import load_dotenv
 import time
 import tempfile
 import subprocess
@@ -14,7 +15,7 @@ import hashlib
 import textwrap
 from collections import namedtuple
 from jinja2 import Environment
-
+load_dotenv() # Load environment variables from .env file
 # Initialize Together AI client
 together_client = together.Together(api_key=os.getenv("TOGETHER_API_KEY"))
 LLM_MODEL="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"

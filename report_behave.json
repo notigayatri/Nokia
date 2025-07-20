@@ -21,7 +21,7 @@
           },
           "name": "api base url \"http://localhost:5000\"",
           "result": {
-            "duration": 0.0,
+            "duration": 0.0016672611236572266,
             "status": "passed"
           },
           "step_type": "given"
@@ -36,11 +36,11 @@
                 "value": "\"/users/1\""
               }
             ],
-            "location": "features/steps/step_definitions.py:10"
+            "location": "features/steps/step_definitions.py:11"
           },
           "name": "I send a GET request to \"/users/1\"",
           "result": {
-            "duration": 0.13866853713989258,
+            "duration": 2.063326358795166,
             "status": "passed"
           },
           "step_type": "when"
@@ -55,11 +55,11 @@
                 "value": "200"
               }
             ],
-            "location": "features/steps/step_definitions.py:14"
+            "location": "features/steps/step_definitions.py:18"
           },
           "name": "the response status code should be 200",
           "result": {
-            "duration": 0.0010669231414794922,
+            "duration": 0.0011143684387207031,
             "status": "passed"
           },
           "step_type": "then"
@@ -74,11 +74,11 @@
                 "value": "\"Alice\""
               }
             ],
-            "location": "features/steps/step_definitions.py:18"
+            "location": "features/steps/step_definitions.py:22"
           },
           "name": "the response should contain \"Alice\"",
           "result": {
-            "duration": 0.0005509853363037109,
+            "duration": 0.0011987686157226562,
             "status": "passed"
           },
           "step_type": "then"
