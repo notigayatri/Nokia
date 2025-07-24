@@ -370,7 +370,7 @@ KUBERNETES_TESTING:
     example: "Application started successfully"
 
 # ========== GENERAL ==========
-GENERAL:
+GENERAL_TESTING:
   - key: setup_script_path
     description: Path to a pre-test setup script
     type: file_path

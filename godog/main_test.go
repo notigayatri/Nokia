@@ -1,41 +1,41 @@
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"strings"
-
 	"github.com/cucumber/godog"
+	"fmt"
 )
 
 type scenarioContext struct {
-	podStatus string
+	expectedResult int
+	firstNumber    int
+	result         int
+	secondNumber   int
 }
 
 func newScenarioContext() *scenarioContext {
 	return &scenarioContext{}
 }
 
-func (s *scenarioContext) givenTheMiniKubeClusterIsAccessible(ctx context.Context) error {
-	// TODO: Implement step logic to check if the mini Kube cluster is accessible
-	log.Println("Checking if the mini Kube cluster is accessible")
+func (s *scenarioContext) givenTheFirstNumberIs(arg1 int) error {
+	s.firstNumber = arg1
+	fmt.Printf("First number set to: %d\n", s.firstNumber)
 	return nil
 }
 
-func (s *scenarioContext) whenICheckTheStatusOfThePodWithLabel(ctx context.Context, label string) error {
-	// TODO: Implement step logic to check the status of the pod with the given label
-	log.Printf("Checking the status of the pod with label %s\n", label)
-	// For demonstration purposes, assume the pod status is "Running"
-	s.podStatus = "Running"
+func (s *scenarioContext) andTheSecondNumberIs(arg1 int) error {
+	s.secondNumber = arg1
 	return nil
 }
 
-func (s *scenarioContext) thenThePodStatusShouldBe(ctx context.Context, status string) error {
-	// TODO: Implement step logic to check if the pod status matches the expected status
-	log.Printf("Checking if the pod status is %s\n", status)
-	if !strings.EqualFold(s.podStatus, status) {
-		return fmt.Errorf("expected pod status to be %s, but got %s", status, s.podStatus)
+func (s *scenarioContext) whenTheCalculatorAddsTheNumbers() error {
+	s.result = s.firstNumber + s.secondNumber
+	return nil
+}
+
+func (s *scenarioContext) thenTheResultShouldBe(arg1 int) error {
+	s.expectedResult = arg1
+	if s.result != s.expectedResult {
+		return fmt.Errorf("result mismatch: expected %d, got %d", s.expectedResult, s.result)
 	}
 	return nil
 }
@@ -43,7 +43,8 @@ func (s *scenarioContext) thenThePodStatusShouldBe(ctx context.Context, status s
 func InitializeScenario(ctx *godog.ScenarioContext) {
 	s := newScenarioContext()
 
-	ctx.Step(`^the mini Kube cluster is accessible$`, s.givenTheMiniKubeClusterIsAccessible)
-	ctx.Step(`^I check the status of the pod with label "([^"]*)"$`, s.whenICheckTheStatusOfThePodWithLabel)
-	ctx.Step(`^the pod status should be "([^"]*)"$`, s.thenThePodStatusShouldBe)
+	ctx.Step(`^the first number is (\d+)$`, s.givenTheFirstNumberIs)
+	ctx.Step(`^the second number is (\d+)$`, s.andTheSecondNumberIs)
+	ctx.Step(`^the calculator adds the numbers$`, s.whenTheCalculatorAddsTheNumbers)
+	ctx.Step(`^the result should be (\d+)$`, s.thenTheResultShouldBe)
 }
