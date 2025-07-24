@@ -7,7 +7,6 @@ import time
 import tempfile
 import subprocess
 from pathlib import Path
-from pathlib import Path
 from jinja2 import Template
 import together
 import yaml
@@ -155,6 +154,7 @@ Possible environments:
 - CLI_TESTING
 - DATABASE_TESTING
 - KUBERNETES_TESTING
+- GENERAL_TESTING
 
 Respond ONLY with the environment name, nothing else.
 
@@ -263,9 +263,9 @@ def load_and_collect_prompt_inputs(env_name: str, prompt_key_file: str = "prompt
             print(f"Options: {options}")
         print(f"Example: {example}")
 
-        user_input = input(f"Enter value for `{key}` (or type `skip` to skip): ").strip()
+        user_input = input(f"Enter value for `{key}` (or type `0` to skip): ").strip()
 
-        if user_input.lower() == "skip":
+        if user_input.lower() == "0":
             continue
 
         user_inputs[key] = user_input
