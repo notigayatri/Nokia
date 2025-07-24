@@ -76,6 +76,11 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 ''')
 
 cucumber_step_template = env.from_string('''package stepdefinitions;
+import io.cucumber.java.en.Given;
+import io.cucumber.java.en.When;
+import io.cucumber.java.en.Then;
+import org.junit.Assert;
+
 // Custom imports for step definitions
 {% for line in custom_imports %}
 import {{ line }};
@@ -84,7 +89,7 @@ import {{ line }};
 public class StepDefinitions {
 
     {% for step in steps %}
-    @{{ step.gherkin_keyword.lower() | capitalize }}("^{{ step.step_text | escape_java_regex }}$")
+    @{{ step.gherkin_keyword.lower() | capitalize }}("{{ step.step_text }}")
     public void {{ step.func_name }}({% if step.parameters %}{% for param in step.parameters %}String {{ param }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}) {
 {{ step.logic | indent(4) }}
     }
@@ -300,42 +305,59 @@ def format_step_for_framework(step_text: str, framework: str):
     parts = []
     last_end = 0
 
-    matches = list(re.finditer(r'"([^"]*)"', step_text))
+    # Extract the Gherkin keyword and the rest of the step text
+    step_keyword_match = re.match(r'^(Given|When|Then|And|But)\s+(.*)', step_text, flags=re.IGNORECASE)
+    if step_keyword_match:
+        # For Cucumber, the annotation pattern should NOT include the keyword itself.
+        # It's like: @Given("I have a step") NOT @Given("Given I have a step")
+        # For other frameworks, we might still want the full step text for matching.
+        text_for_pattern = step_keyword_match.group(2).strip() # Capture only the part AFTER the keyword
+    else:
+        text_for_pattern = step_text # Fallback, though ideally input is always Gherkin step
+
+    # --- IMPORTANT: Work with text_for_pattern from now on ---
+    matches = list(re.finditer(r'"([^"]*)"', text_for_pattern))
 
     for i, match in enumerate(matches):
-        static_part = step_text[last_end:match.start()]
-        if framework == "cucumber" or framework == "godog":
-            static_part = re.escape(static_part).replace(r'\ ', ' ')
-        parts.append(static_part)
+        static_part = text_for_pattern[last_end:match.start()]
 
-        preceding_text = step_text[:match.start()]
-        preceding_words = re.findall(r'\b\w+\b', preceding_text)
+        # Static parts for Godog need escaping. For Cucumber, they are literal.
+        if framework == "godog":
+            parts.append(re.escape(static_part).replace(r'\ ', ' '))
+        else: # For behave and cucumber, just append the literal static part
+            parts.append(static_part)
+
+        preceding_text_in_pattern = text_for_pattern[:match.start()]
+        preceding_words = re.findall(r'\b\w+\b', preceding_text_in_pattern) # Analyze words before the parameter
         if preceding_words:
             name = preceding_words[-1].lower()
             original_name = name
             k = 0
-            while name in param_names:
+            while name in param_names: # Ensure unique parameter names
                 k += 1
                 name = f"{original_name}{k}"
         else:
-            name = f"param{i}"
-            
+            name = f"param{i}" # Fallback if no descriptive word
+
         param_names.append(name)
 
         if framework == "behave":
-            parts.append(f"{{{name}}}")
-        else:
-            parts.append(r"\"([^\"]*)\"")
-        
+            parts.append(f"{{{name}}}") # Behave's format
+        elif framework == "cucumber":
+            parts.append("{string}") # Cucumber's preferred string parameter type
+        elif framework == "godog":
+            parts.append("([^\\\"]*)") # Godog's regex for capturing a string
+
         last_end = match.end()
 
-    remaining_part = step_text[last_end:]
-    if framework == "cucumber" or framework == "godog":
-        remaining_part = re.escape(remaining_part).replace(r'\ ', ' ')
-    parts.append(remaining_part)
+    remaining_part = text_for_pattern[last_end:]
+    if framework == "godog":
+        parts.append(re.escape(remaining_part).replace(r'\ ', ' '))
+    else: # For behave and cucumber, just append the literal remaining part
+        parts.append(remaining_part)
 
     formatted_step_pattern = "".join(parts).strip()
-    
+
     return formatted_step_pattern, param_names
 
 def parse_feature_by_scenario(feature_content: str):
@@ -469,14 +491,16 @@ User context:
 ---
 **INSTRUCTIONS:**
 1.  **Return only the method body.** No annotations, no method signature.
-2.  **Do NOT include comments or markdown code fences (e.g., ```java).**
-3.  Use exact parameter names: {{ parameters }}.
-4.  Interact using Java code — for example, using RestAssured, Selenium, or Java ProcessBuilder.
-5.  Use static/shared variables for state transfer if needed.
-6.  Parse responses carefully, avoid hardcoding outputs.
-7.  Add imports like `import io.restassured.RestAssured;` if used.
-8.  Validate runtime output before comparing or asserting.
-9.  Do not access the `prompt_inputs` directly in code — they are for structure understanding only.
+2.  **You MUST provide concrete, executable Java code for the step logic.** Do NOT return empty lines, placeholders, or comments without code. If you cannot provide a working solution, use `throw new io.cucumber.java.PendingException();`
+3.  **DO NOT include comments or markdown code fences (e.g., ```java).** Your response should be raw Java code.
+4.  **Include all necessary Java `import` statements at the very top of your generated method body.** Each import should be on a new line and end with a semicolon (e.g., `import java.io.IOException;`). These will be extracted and moved to the class level.
+5.  Use exact parameter names: {{ parameters }}.
+6.  Interact using Java code — for example, using RestAssured, Selenium, or Java ProcessBuilder.
+7.  Use static/shared variables for state transfer if needed.
+8.  Parse responses carefully, avoid hardcoding outputs.
+9.  Validate runtime output before comparing or asserting.
+10. Do not access the `prompt_inputs` directly in code — they are for structure understanding only.
+11. **Do NOT include any surrounding class declarations, package declarations, or extra methods or unused imports or unused variables**
 {% if previous_step_error %}
 Previous attempt for this step failed with this error. Please fix:
 {{ previous_step_error }}
@@ -488,6 +512,51 @@ Write the Cucumber Java method body now:
 
 def extract_context_vars_from_logic(logic: str) -> set:
     return set(re.findall(r"context\.([a-zA-Z_][a-zA-Z0-9_]*)", logic))
+
+def filter_unused_imports(import_lines, logic, framework):
+    """
+    Returns only those imports that are actually used in the logic.
+    """
+    used_imports = []
+    logic_text = logic if isinstance(logic, str) else "\n".join(logic)
+    for imp in import_lines:
+        if framework == "behave":
+            # For Python: check if the imported module or symbol is used
+            m = re.match(r'(?:from\s+([a-zA-Z0-9_.]+)\s+import\s+([a-zA-Z0-9_*,{} ]+))|(?:import\s+([a-zA-Z0-9_\.]+))', imp)
+            if m:
+                symbols = []
+                if m.group(2):
+                    # from ... import ...
+                    symbols = [s.strip() for s in re.split(r',|{|}', m.group(2)) if s.strip() and s.strip() != '*']
+                elif m.group(3):
+                    # import ...
+                    symbols = [m.group(3).split('.')[-1]]
+                # If any symbol is used in logic, keep the import
+                if any(re.search(r'\b' + re.escape(sym) + r'\b', logic_text) for sym in symbols):
+                    used_imports.append(imp)
+            else:
+                used_imports.append(imp)  # fallback: keep if can't parse
+        elif framework == "godog":
+            # For Go: check if the imported package is used (very basic)
+            m = re.match(r'import\s+"([a-zA-Z0-9_/\.]+)"', imp)
+            if m:
+                pkg = m.group(1).split('/')[-1]
+                if re.search(r'\b' + re.escape(pkg) + r'\b', logic_text):
+                    used_imports.append(imp)
+            else:
+                used_imports.append(imp)
+        elif framework == "cucumber":
+            # For Java: check if the class is used
+            m = re.match(r'import\s+([a-zA-Z0-9_.]+)\.([A-Z][a-zA-Z0-9_]+);', imp)
+            if m:
+                class_name = m.group(2)
+                if re.search(r'\b' + re.escape(class_name) + r'\b', logic_text):
+                    used_imports.append(imp)
+            else:
+                used_imports.append(imp)
+        else:
+            used_imports.append(imp)
+    return used_imports
 
 def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, environment: str, scenario_content: str, full_feature_content: str, previous_step_error: str = None) -> dict:
 
@@ -528,7 +597,6 @@ def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, 
         response = together_client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": logic_prompt}],
-            stop=["```", "go", "python", "java"],  # Stop on code fences or language specifiers
             temperature=0.4 # Keep temperature low for deterministic code
         )
         raw_llm_output = response.choices[0].message.content.strip()
@@ -543,18 +611,26 @@ def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, 
         raw_llm_output = re.sub(r'^(?:Here\'s the code:?|```\w*\n|```)\s*', '', raw_llm_output, flags=re.IGNORECASE | re.MULTILINE)
         raw_llm_output = re.sub(r'\s*(?:Hope this helps!?|Let me know if you have questions\.?|```\s*)$', '', raw_llm_output, flags=re.IGNORECASE | re.MULTILINE)
         raw_llm_output = raw_llm_output.strip()
+
         # 3. Extract Imports
-        # Regex to capture import lines, starting from beginning of line, capturing entire line
-        # Use re.DEBUG flag to understand regex: print(re.findall(r'^(?:import\s+\S+(?: as \S+)?|from\s+\S+\s+import\s+\S+(?: as \S+)?(?:,\s*\S+(?: as \S+)?)*)', raw_llm_output, re.MULTILINE))
-        
-        # More robust import regex:
-        import_lines = re.findall(r'^\s*(?:import\s+[a-zA-Z0-9_.]+(?:\s+as\s+[a-zA-Z0-9_]+)?|from\s+[a-zA-Z0-9_.]+\s+import\s+(?:[a-zA-Z0-9_]+|\*|{[^}]+})(?:\s*,\s*(?:[a-zA-Z0-9_]+|\*|{[^}]+}))*)\s*$',
-                                  raw_llm_output, re.MULTILINE)
-        
-        # Remove extracted import lines from the logic
+        import_lines_set = set()
         logic_cleaned = raw_llm_output
-        for imp_line in import_lines:
-            logic_cleaned = logic_cleaned.replace(imp_line, '').strip() # Replace exactly matched import lines
+
+        if framework == "cucumber":
+            # Regex for Java imports: e.g., "import com.example.MyClass;"
+            java_import_regex = r'^\s*import\s+[a-zA-Z0-9_.]+\s*;\s*$'
+            found_java_imports = re.findall(java_import_regex, logic_cleaned, re.MULTILINE)
+            for imp_line in found_java_imports:
+                import_lines_set.add(imp_line.strip())
+                logic_cleaned = logic_cleaned.replace(imp_line, '') # Remove from logic
+        else: # For behave and godog (Python/Go imports)
+            python_go_import_regex = r'^\s*(?:import\s+[a-zA-Z0-9_.]+(?:\s+as\s+[a-zA-Z0-9_]+)?|from\s+[a-zA-Z0-9_.]+\s+import\s+(?:[a-zA-Z0-9_]+|\*|{[^}]+})(?:\s*,\s*(?:[a-zA-Z0-9_]+|\*|{[^}]+}))*)\s*$'
+            found_imports = re.findall(python_go_import_regex, logic_cleaned, re.MULTILINE)
+            for imp_line in found_imports:
+                import_lines_set.add(imp_line.strip())
+                logic_cleaned = logic_cleaned.replace(imp_line, '') # Remove from logic
+        # After extracting logic_cleaned and import_lines_set
+        filtered_imports = filter_unused_imports(import_lines_set, logic_cleaned, framework)
 
         # 4. Remove accidental outer function definitions (LLM might sometimes try to define the function again)
         #    This regex is for Python 'def', adjust for 'func' (Go) or 'public void' (Java) as needed by framework
@@ -573,7 +649,12 @@ def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, 
 
         # Handle empty logic if cleaning removed everything
         if not final_logic:
-            final_logic = "pass" if framework == "behave" else "// TODO: Implement step logic"
+            # Use Cucumber's PendingException for Java, not generic "// TODO"
+            if framework == "cucumber":
+                final_logic = "throw new io.cucumber.java.PendingException();"
+            else: # For other frameworks
+                final_logic = "pass" if framework == "behave" else "// TODO: Implement step logic"
+
 
         # Always sanitize quoted string parameters for Behave
         if framework == "behave" and parameters:
@@ -587,9 +668,9 @@ def generate_step_metadata(step_text: str, framework: str, prompt_inputs: dict, 
         return {
             "func_name": func_name,
             "parameters": parameters,
-            "step_text": formatted_step_text[len(gherkin_keyword) + 1:] if formatted_step_text.lower().startswith(gherkin_keyword + ' ') else formatted_step_text,
+            "step_text": formatted_step_text,
             "logic": final_logic,
-            "imports": sorted(set([line.strip() for line in import_lines])),
+            "imports": sorted(filtered_imports),
             "gherkin_keyword": gherkin_keyword
         }
 
@@ -633,7 +714,7 @@ def generate_framework_code(all_step_metadata, framework, custom_imports, scenar
 
     elif framework == "cucumber":
         return cucumber_step_template.render(
-            custom_imports="\n".join(custom_imports),
+            custom_imports=custom_imports,
             steps=[
                 {
                     "func_name": step["func_name"],
@@ -708,7 +789,7 @@ Step Definitions File:
 """
     # This is the crucial part that was missing or incorrect:
     if previous_error:
-        prompt += f"\n\n⚠️ Previous validation failed with this error. Please fix:\n{previous_error}"
+        prompt += f"\n\nPrevious validation failed with this error. Please fix:\n{previous_error}"
 
     try:
         response = together_client.chat.completions.create(
@@ -726,8 +807,11 @@ def validate_code(code, framework):
     try:
         if framework == 'behave': # Python validation
             # Validate syntax using AST
-            ast.parse(code)
-            return True, None
+            try:
+                ast.parse(code)
+                return True, None
+            except SyntaxError as e:
+                return False, f"Python syntax error: {str(e)}"
 
         elif framework == 'godog': # Go validation
             with tempfile.NamedTemporaryFile(delete=False, suffix=".go", mode='w') as temp_file:
@@ -760,9 +844,7 @@ def validate_code(code, framework):
             os.remove(temp_file_path) # Clean up temporary file
             return True, None
 
-        elif framework == 'cucumber': # Java validation (RESTORED CORRECT LOGIC)
-            # For Java, validation is more complex as it involves compilation.
-            # We'll need to write the code to a temporary project structure and try to compile.
+        elif framework == 'cucumber':
             with tempfile.TemporaryDirectory() as temp_dir:
                 base_path = Path(temp_dir)
                 stepdefs_dir = base_path / "src/test/java/stepdefinitions"
@@ -773,22 +855,18 @@ def validate_code(code, framework):
                 runner_dir.mkdir(parents=True, exist_ok=True)
                 features_dir.mkdir(parents=True, exist_ok=True)
 
-                # Write the step definitions file
                 (stepdefs_dir / "StepDefinitions.java").write_text(code)
-                # Write a minimal runner and pom.xml for compilation
-                # These templates are assumed to be defined globally or passed in
                 (runner_dir / "TestRunner.java").write_text(cucumber_runner_template.render())
                 (base_path / "pom.xml").write_text(pom_template.render())
-                # A dummy feature file might be needed for compilation to succeed
                 (features_dir / "temp.feature").write_text("Feature: Temp\n  Scenario: Temp\n    Given a temp step")
 
-
-                # Try to compile the Java code using Maven
-                # `mvn compile` will check syntax and dependencies
+                # Use 'mvn test-compile' or 'mvn test' to compile test sources
+                # 'mvn test' is more comprehensive as it also runs tests, catching runtime issues.
                 compile_result = subprocess.run(["mvn", "compile"], cwd=base_path, capture_output=True, text=True, shell=True)
                 
                 if compile_result.returncode != 0:
-                    return False, f"Java compilation error detected by Maven: {compile_result.stderr.strip()}"
+                    error_output = compile_result.stderr.strip() or compile_result.stdout.strip()
+                    return False, f"Java compilation error detected by Maven:\n{error_output}"
             
             return True, None
 
@@ -906,12 +984,14 @@ def main():
             print(f"Code validated successfully on attempt {attempt+1}.")
             break # Exit the retry loop
         else:
-            print(f"Attempt {attempt+1}: Validation failed with error:\n{validation_error_message}")
+            print(f"[Retry] Attempt {attempt+1} failed. Retrying after LLM fix...")
             # The `validation_error_message` is already set for the next iteration.
 
     if not is_valid_code:
-        print("Final code validation failed after multiple attempts. Exiting.")
+        print("\n Final code validation failed after 3 attempts.")
+        print("Last encountered error:\n" + validation_error_message)
         return
+
     
     # Step 7: Write to file
     write_code(framework, feature_content, final_generated_code, Path(feature_file_path).name)

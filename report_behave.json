@@ -3,82 +3,58 @@
   "elements": [
     {
       "keyword": "Scenario",
-      "location": "features/user.feature:3",
-      "name": "Get user by id",
+      "location": "features/pod.feature:3",
+      "name": "Check if the pod is in Running state",
       "status": "passed",
       "steps": [
         {
           "keyword": "Given",
-          "location": "features/user.feature:4",
+          "location": "features/pod.feature:4",
           "match": {
-            "arguments": [
-              {
-                "name": "url",
-                "value": "\"http://localhost:5000\""
-              }
-            ],
+            "arguments": [],
             "location": "features/steps/step_definitions.py:6"
           },
-          "name": "api base url \"http://localhost:5000\"",
+          "name": "the mini Kube cluster is accessible",
           "result": {
-            "duration": 0.0,
+            "duration": 2.5448086261749268,
             "status": "passed"
           },
           "step_type": "given"
         },
         {
           "keyword": "When",
-          "location": "features/user.feature:5",
+          "location": "features/pod.feature:5",
           "match": {
             "arguments": [
               {
-                "name": "to",
-                "value": "\"/users/1\""
+                "name": "label",
+                "value": "\"app=flask-api\""
               }
             ],
-            "location": "features/steps/step_definitions.py:10"
+            "location": "features/steps/step_definitions.py:35"
           },
-          "name": "I send a GET request to \"/users/1\"",
+          "name": "I check the status of the pod with label \"app=flask-api\"",
           "result": {
-            "duration": 0.13866853713989258,
+            "duration": 0.2464747428894043,
             "status": "passed"
           },
           "step_type": "when"
         },
         {
           "keyword": "Then",
-          "location": "features/user.feature:6",
+          "location": "features/pod.feature:6",
           "match": {
             "arguments": [
               {
-                "name": "status_code",
-                "value": "200"
+                "name": "status",
+                "value": "\"Running\""
               }
             ],
-            "location": "features/steps/step_definitions.py:14"
+            "location": "features/steps/step_definitions.py:41"
           },
-          "name": "the response status code should be 200",
+          "name": "the pod status should be \"Running\"",
           "result": {
-            "duration": 0.0010669231414794922,
-            "status": "passed"
-          },
-          "step_type": "then"
-        },
-        {
-          "keyword": "And",
-          "location": "features/user.feature:7",
-          "match": {
-            "arguments": [
-              {
-                "name": "contain",
-                "value": "\"Alice\""
-              }
-            ],
-            "location": "features/steps/step_definitions.py:18"
-          },
-          "name": "the response should contain \"Alice\"",
-          "result": {
-            "duration": 0.0005509853363037109,
+            "duration": 0.0005331039428710938,
             "status": "passed"
           },
           "step_type": "then"
@@ -89,8 +65,8 @@
     }
   ],
   "keyword": "Feature",
-  "location": "features/user.feature:1",
-  "name": "User API",
+  "location": "features/pod.feature:1",
+  "name": "Pod health check",
   "status": "passed",
   "tags": []
 }
