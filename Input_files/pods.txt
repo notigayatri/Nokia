@@ -1,0 +1,12 @@
+Feature Description:
+The system should be able to verify the operational health of deployed application pods within the Kubernetes cluster.
+
+Specific Test/Behavior:
+Objective: Verify that a specific application pod is running correctly.
+Details:
+
+Prerequisite: Ensure that the mini Kube cluster is up and reachable.
+
+Action: Request the current operational status of the pod that has the label "app=flask-api".
+
+Expected Outcome: The returned status for this pod must explicitly indicate "Running".

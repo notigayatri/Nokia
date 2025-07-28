@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="runner.TestRunner" time="3.09" tests="1" errors="0" skipped="0" failures="0">
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="runner.TestRunner" time="2.847" tests="1" errors="0" skipped="0" failures="0">
   <properties>
     <property name="java.specification.version" value="21"/>
     <property name="sun.cpu.isalist" value="amd64"/>
     <property name="sun.jnu.encoding" value="Cp1252"/>
-    <property name="java.class.path" value="C:\Nokia\Nokia\cucumber\target\test-classes;C:\Nokia\Nokia\cucumber\target\classes;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-java\7.14.0\cucumber-java-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-core\7.14.0\cucumber-core-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-gherkin\7.14.0\cucumber-gherkin-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-gherkin-messages\7.14.0\cucumber-gherkin-messages-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\gherkin\26.2.0\gherkin-26.2.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\messages\22.0.0\messages-22.0.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\tag-expressions\5.0.6\tag-expressions-5.0.6.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-expressions\16.1.2\cucumber-expressions-16.1.2.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\datatable\7.14.0\datatable-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-plugin\7.14.0\cucumber-plugin-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\docstring\7.14.0\docstring-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\html-formatter\20.4.0\html-formatter-20.4.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\junit-xml-formatter\0.2.0\junit-xml-formatter-0.2.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\ci-environment\9.2.0\ci-environment-9.2.0.jar;C:\Users\LENOVO\.m2\repository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-junit\7.14.0\cucumber-junit-7.14.0.jar;C:\Users\LENOVO\.m2\repository\junit\junit\4.13.2\junit-4.13.2.jar;C:\Users\LENOVO\.m2\repository\org\hamcrest\hamcrest-core\1.3\hamcrest-core-1.3.jar;"/>
+    <property name="java.class.path" value="C:\Nokia\Nokia 1\cucumber\target\test-classes;C:\Nokia\Nokia 1\cucumber\target\classes;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-java\7.14.0\cucumber-java-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-core\7.14.0\cucumber-core-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-gherkin\7.14.0\cucumber-gherkin-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-gherkin-messages\7.14.0\cucumber-gherkin-messages-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\gherkin\26.2.0\gherkin-26.2.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\messages\22.0.0\messages-22.0.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\tag-expressions\5.0.6\tag-expressions-5.0.6.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-expressions\16.1.2\cucumber-expressions-16.1.2.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\datatable\7.14.0\datatable-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-plugin\7.14.0\cucumber-plugin-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\docstring\7.14.0\docstring-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\html-formatter\20.4.0\html-formatter-20.4.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\junit-xml-formatter\0.2.0\junit-xml-formatter-0.2.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\ci-environment\9.2.0\ci-environment-9.2.0.jar;C:\Users\LENOVO\.m2\repository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-junit\7.14.0\cucumber-junit-7.14.0.jar;C:\Users\LENOVO\.m2\repository\junit\junit\4.13.2\junit-4.13.2.jar;C:\Users\LENOVO\.m2\repository\org\hamcrest\hamcrest-core\1.3\hamcrest-core-1.3.jar;"/>
     <property name="java.vm.vendor" value="Azul Systems, Inc."/>
     <property name="sun.arch.data.model" value="64"/>
     <property name="user.variant" value=""/>
@@ -15,9 +15,9 @@
     <property name="sun.java.launcher" value="SUN_STANDARD"/>
     <property name="user.country" value="IN"/>
     <property name="sun.boot.library.path" value="C:\Program Files\Zulu\zulu-21\bin"/>
-    <property name="sun.java.command" value="C:\Users\LENOVO\AppData\Local\Temp\surefire12093078081299001085\surefirebooter-20250724004338715_3.jar C:\Users\LENOVO\AppData\Local\Temp\surefire12093078081299001085 2025-07-24T00-43-38_201-jvmRun1 surefire-20250724004338715_1tmp surefire_0-20250724004338715_2tmp"/>
+    <property name="sun.java.command" value="C:\Users\LENOVO\AppData\Local\Temp\surefire862090387843909564\surefirebooter-20250728130119740_3.jar C:\Users\LENOVO\AppData\Local\Temp\surefire862090387843909564 2025-07-28T13-01-19_344-jvmRun1 surefire-20250728130119740_1tmp surefire_0-20250728130119740_2tmp"/>
     <property name="jdk.debug" value="release"/>
-    <property name="surefire.test.class.path" value="C:\Nokia\Nokia\cucumber\target\test-classes;C:\Nokia\Nokia\cucumber\target\classes;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-java\7.14.0\cucumber-java-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-core\7.14.0\cucumber-core-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-gherkin\7.14.0\cucumber-gherkin-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-gherkin-messages\7.14.0\cucumber-gherkin-messages-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\gherkin\26.2.0\gherkin-26.2.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\messages\22.0.0\messages-22.0.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\tag-expressions\5.0.6\tag-expressions-5.0.6.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-expressions\16.1.2\cucumber-expressions-16.1.2.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\datatable\7.14.0\datatable-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-plugin\7.14.0\cucumber-plugin-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\docstring\7.14.0\docstring-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\html-formatter\20.4.0\html-formatter-20.4.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\junit-xml-formatter\0.2.0\junit-xml-formatter-0.2.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\ci-environment\9.2.0\ci-environment-9.2.0.jar;C:\Users\LENOVO\.m2\repository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-junit\7.14.0\cucumber-junit-7.14.0.jar;C:\Users\LENOVO\.m2\repository\junit\junit\4.13.2\junit-4.13.2.jar;C:\Users\LENOVO\.m2\repository\org\hamcrest\hamcrest-core\1.3\hamcrest-core-1.3.jar;"/>
+    <property name="surefire.test.class.path" value="C:\Nokia\Nokia 1\cucumber\target\test-classes;C:\Nokia\Nokia 1\cucumber\target\classes;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-java\7.14.0\cucumber-java-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-core\7.14.0\cucumber-core-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-gherkin\7.14.0\cucumber-gherkin-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-gherkin-messages\7.14.0\cucumber-gherkin-messages-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\gherkin\26.2.0\gherkin-26.2.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\messages\22.0.0\messages-22.0.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\tag-expressions\5.0.6\tag-expressions-5.0.6.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-expressions\16.1.2\cucumber-expressions-16.1.2.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\datatable\7.14.0\datatable-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-plugin\7.14.0\cucumber-plugin-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\docstring\7.14.0\docstring-7.14.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\html-formatter\20.4.0\html-formatter-20.4.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\junit-xml-formatter\0.2.0\junit-xml-formatter-0.2.0.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\ci-environment\9.2.0\ci-environment-9.2.0.jar;C:\Users\LENOVO\.m2\repository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar;C:\Users\LENOVO\.m2\repository\io\cucumber\cucumber-junit\7.14.0\cucumber-junit-7.14.0.jar;C:\Users\LENOVO\.m2\repository\junit\junit\4.13.2\junit-4.13.2.jar;C:\Users\LENOVO\.m2\repository\org\hamcrest\hamcrest-core\1.3\hamcrest-core-1.3.jar;"/>
     <property name="sun.cpu.endian" value="little"/>
     <property name="user.home" value="C:\Users\LENOVO"/>
     <property name="user.language" value="en"/>
@@ -25,12 +25,12 @@
     <property name="java.version.date" value="2025-04-15"/>
     <property name="java.home" value="C:\Program Files\Zulu\zulu-21"/>
     <property name="file.separator" value="\"/>
-    <property name="basedir" value="C:\Nokia\Nokia\cucumber"/>
+    <property name="basedir" value="C:\Nokia\Nokia 1\cucumber"/>
     <property name="java.vm.compressedOopsMode" value="Zero based"/>
     <property name="line.separator" value="&#10;"/>
     <property name="java.vm.specification.vendor" value="Oracle Corporation"/>
     <property name="java.specification.name" value="Java Platform API Specification"/>
-    <property name="surefire.real.class.path" value="C:\Users\LENOVO\AppData\Local\Temp\surefire12093078081299001085\surefirebooter-20250724004338715_3.jar"/>
+    <property name="surefire.real.class.path" value="C:\Users\LENOVO\AppData\Local\Temp\surefire862090387843909564\surefirebooter-20250728130119740_3.jar"/>
     <property name="user.script" value=""/>
     <property name="sun.management.compiler" value="HotSpot 64-Bit Tiered Compilers"/>
     <property name="java.runtime.version" value="21.0.7+6-LTS"/>
@@ -46,7 +46,7 @@
     <property name="java.vendor.url.bug" value="http://www.azul.com/support/"/>
     <property name="java.io.tmpdir" value="C:\Users\LENOVO\AppData\Local\Temp\"/>
     <property name="java.version" value="21.0.7"/>
-    <property name="user.dir" value="C:\Nokia\Nokia\cucumber"/>
+    <property name="user.dir" value="C:\Nokia\Nokia 1\cucumber"/>
     <property name="os.arch" value="amd64"/>
     <property name="java.vm.specification.name" value="Java Virtual Machine Specification"/>
     <property name="sun.os.patch.level" value=""/>
@@ -59,12 +59,13 @@
     <property name="sun.io.unicode.encoding" value="UnicodeLittle"/>
     <property name="java.class.version" value="65.0"/>
   </properties>
-  <testcase name="Check if the pod is in Running state" classname="Pod health check" time="1.853">
+  <testcase name="Verify a specific application pod is running correctly" classname="Verify operational health of deployed application pods" time="1.815">
     <system-out><![CDATA[
-Scenario: Check if the pod is in Running state                  &amp#27;[90m# src/test/resources/features/pod.feature:3&amp#27;[0m
-  &amp#27;[32mGiven &amp#27;[0m&amp#27;[32mthe mini Kube cluster is accessible&amp#27;[0m                     &amp#27;[90m# stepdefinitions.StepDefinitions.given_the_mini_kube_cluster_is_accessible()&amp#27;[0m
-  &amp#27;[32mWhen &amp#27;[0m&amp#27;[32mI check the status of the pod with label &amp#27;[0m&amp#27;[32m&amp#27;[1m"app=flask-api"&amp#27;[0m &amp#27;[90m# stepdefinitions.StepDefinitions.when_i_check_the_status_of_the_pod_with_label(java.lang.String)&amp#27;[0m
-  &amp#27;[32mThen &amp#27;[0m&amp#27;[32mthe pod status should be &amp#27;[0m&amp#27;[32m&amp#27;[1m"Running"&amp#27;[0m                       &amp#27;[90m# stepdefinitions.StepDefinitions.then_the_pod_status_should_be(java.lang.String)&amp#27;[0m
+Scenario: Verify a specific application pod is running correctly                      &amp#27;[90m# src/test/resources/features/pods.feature:4&amp#27;[0m
+  &amp#27;[32mGiven &amp#27;[0m&amp#27;[32mthe mini Kube cluster is up and reachable&amp#27;[0m                                     &amp#27;[90m# stepdefinitions.StepDefinitions.given_the_mini_kube_cluster_is_up_and_reachable()&amp#27;[0m
+Pod status: STATUS
+  &amp#27;[32mWhen &amp#27;[0m&amp#27;[32mI request the current operational status of the pod with label &amp#27;[0m&amp#27;[32m&amp#27;[1m"app=flask-api"&amp#27;[0m &amp#27;[90m# stepdefinitions.StepDefinitions.when_i_request_the_current_operational_status_of_the_pod_with_label(java.lang.String)&amp#27;[0m
+  &amp#27;[32mThen &amp#27;[0m&amp#27;[32mthe returned status for this pod must be &amp#27;[0m&amp#27;[32m&amp#27;[1m"Running"&amp#27;[0m                             &amp#27;[90m# stepdefinitions.StepDefinitions.then_the_returned_status_for_this_pod_must_be(java.lang.String)&amp#27;[0m
 ]]></system-out>
   </testcase>
 </testsuite>

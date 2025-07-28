@@ -3,9 +3,147 @@
   "elements": [
     {
       "keyword": "Scenario",
+      "location": "features/calculator.feature:3",
+      "name": "Add two numbers",
+      "status": "failed",
+      "steps": [
+        {
+          "keyword": "Given",
+          "location": "features/calculator.feature:4",
+          "name": "the first number is 5",
+          "result": {
+            "duration": 0,
+            "status": "undefined"
+          },
+          "step_type": "given"
+        },
+        {
+          "keyword": "And",
+          "location": "features/calculator.feature:5",
+          "name": "the second number is 7",
+          "step_type": "given"
+        },
+        {
+          "keyword": "When",
+          "location": "features/calculator.feature:6",
+          "name": "the calculator adds the numbers",
+          "step_type": "when"
+        },
+        {
+          "keyword": "Then",
+          "location": "features/calculator.feature:7",
+          "name": "the result should be 12",
+          "step_type": "then"
+        }
+      ],
+      "tags": [],
+      "type": "scenario"
+    }
+  ],
+  "keyword": "Feature",
+  "location": "features/calculator.feature:1",
+  "name": "Calculator Addition",
+  "status": "failed",
+  "tags": []
+},
+
+{
+  "elements": [
+    {
+      "keyword": "Scenario",
+      "location": "features/login.feature:3",
+      "name": "Successful login with valid credentials",
+      "status": "failed",
+      "steps": [
+        {
+          "keyword": "Given",
+          "location": "features/login.feature:4",
+          "name": "the user provides username \"admin\" and password \"secret\"",
+          "result": {
+            "duration": 0,
+            "status": "undefined"
+          },
+          "step_type": "given"
+        },
+        {
+          "keyword": "When",
+          "location": "features/login.feature:5",
+          "name": "the user tries to log in",
+          "step_type": "when"
+        },
+        {
+          "keyword": "Then",
+          "location": "features/login.feature:6",
+          "name": "the login should be successful",
+          "step_type": "then"
+        }
+      ],
+      "tags": [],
+      "type": "scenario"
+    }
+  ],
+  "keyword": "Feature",
+  "location": "features/login.feature:1",
+  "name": "User Login",
+  "status": "failed",
+  "tags": []
+},
+
+{
+  "elements": [
+    {
+      "keyword": "Scenario",
+      "location": "features/nginxpod.feature:3",
+      "name": "Check if NGINX service is accessible",
+      "status": "failed",
+      "steps": [
+        {
+          "keyword": "Given",
+          "location": "features/nginxpod.feature:4",
+          "name": "the NGINX service is deployed in the Kubernetes cluster",
+          "result": {
+            "duration": 0,
+            "status": "undefined"
+          },
+          "step_type": "given"
+        },
+        {
+          "keyword": "When",
+          "location": "features/nginxpod.feature:5",
+          "name": "I send a GET request to the NGINX NodePort URL",
+          "step_type": "when"
+        },
+        {
+          "keyword": "Then",
+          "location": "features/nginxpod.feature:6",
+          "name": "I should receive a 200 OK response",
+          "step_type": "then"
+        },
+        {
+          "keyword": "And",
+          "location": "features/nginxpod.feature:7",
+          "name": "the response should contain \"Welcome to nginx!\"",
+          "step_type": "then"
+        }
+      ],
+      "tags": [],
+      "type": "scenario"
+    }
+  ],
+  "keyword": "Feature",
+  "location": "features/nginxpod.feature:1",
+  "name": "Verify NGINX deployment on Kubernetes",
+  "status": "failed",
+  "tags": []
+},
+
+{
+  "elements": [
+    {
+      "keyword": "Scenario",
       "location": "features/pod.feature:3",
       "name": "Check if the pod is in Running state",
-      "status": "passed",
+      "status": "failed",
       "steps": [
         {
           "keyword": "Given",
@@ -16,7 +154,7 @@
           },
           "name": "the mini Kube cluster is accessible",
           "result": {
-            "duration": 2.5448086261749268,
+            "duration": 3.806607246398926,
             "status": "passed"
           },
           "step_type": "given"
@@ -31,32 +169,35 @@
                 "value": "\"app=flask-api\""
               }
             ],
-            "location": "features/steps/step_definitions.py:35"
+            "location": "features/steps/step_definitions.py:19"
           },
           "name": "I check the status of the pod with label \"app=flask-api\"",
           "result": {
-            "duration": 0.2464747428894043,
-            "status": "passed"
+            "duration": 1.7530477046966553,
+            "error_message": [
+              "Traceback (most recent call last):",
+              "  File \"C:\\Users\\LENOVO\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python311\\site-packages\\behave\\model.py\", line 1329, in run",
+              "    match.run(runner.context)",
+              "  File \"C:\\Users\\LENOVO\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python311\\site-packages\\behave\\matchers.py\", line 98, in run",
+              "    self.func(context, *args, **kwargs)",
+              "  File \"features\\steps\\step_definitions.py\", line 23, in step_impl",
+              "    pod_list = subprocess.check_output(f\"minikube kubectl get pods -l {label}\", shell=True).decode('utf-8')",
+              "               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+              "  File \"C:\\Users\\LENOVO\\anaconda3\\Lib\\subprocess.py\", line 466, in check_output",
+              "    return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,",
+              "           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+              "  File \"C:\\Users\\LENOVO\\anaconda3\\Lib\\subprocess.py\", line 571, in run",
+              "    raise CalledProcessError(retcode, process.args,",
+              "subprocess.CalledProcessError: Command 'minikube kubectl get pods -l app=flask-api' returned non-zero exit status 14."
+            ],
+            "status": "failed"
           },
           "step_type": "when"
         },
         {
           "keyword": "Then",
           "location": "features/pod.feature:6",
-          "match": {
-            "arguments": [
-              {
-                "name": "status",
-                "value": "\"Running\""
-              }
-            ],
-            "location": "features/steps/step_definitions.py:41"
-          },
           "name": "the pod status should be \"Running\"",
-          "result": {
-            "duration": 0.0005331039428710938,
-            "status": "passed"
-          },
           "step_type": "then"
         }
       ],
@@ -67,7 +208,7 @@
   "keyword": "Feature",
   "location": "features/pod.feature:1",
   "name": "Pod health check",
-  "status": "passed",
+  "status": "failed",
   "tags": []
 }
 ]

@@ -143,110 +143,81 @@ pom_template = Template('''<project xmlns="http://maven.apache.org/POM/4.0.0"
 </project>
 ''')
 
+def convert_text_to_bdd_file(input_path: Path, output_format: str):
+    """
+    Converts a text, .feature, or .spec file into a well-organized BDD file
+    in the requested format ("gherkin" or "markdown") using the LLM.
+    Writes the file to the appropriate folder and returns (output_file_path, content).
+    """
+    # Read the input file content
+    input_content = input_path.read_text(encoding="utf-8")
 
-StepBody = namedtuple("StepBody", ["params", "code"])
+    # Prepare the LLM prompt
+    if output_format == "gherkin":
+        prompt = f"""
+You are an expert in writing Gherkin feature files for BDD frameworks.
+Organize and rewrite the following content as a clean, well-formatted Gherkin feature file.
+- Use correct Gherkin syntax (Feature, Scenario, Scenario Outline, Given, When, Then, Examples, etc.).
+- Ensure all steps and examples are properly aligned and indented.
+- Highlight any parameters in the steps using double quotes.
+- Do not include any explanations or markdown code fences.
+- Only output the .feature file content.
 
-def infer_environment_with_llm(feature_content: str) -> str:
-    print("\nInferring the environment type from the feature file...")
-
-    prompt = f"""
-You are an expert test automation analyst.
-
-Below is a Gherkin feature file. Based on its content, predict the environment where this test belongs.
-Possible environments:
-- WEB_UI_TESTING
-- API_TESTING
-- CLI_TESTING
-- DATABASE_TESTING
-- KUBERNETES_TESTING
-- GENERAL_TESTING
-
-Respond ONLY with the environment name, nothing else.
-
-Feature file:
+Content:
 ---
-{feature_content}
+{input_content}
 ---
 """
+        out_folder = Path("features")
+        out_folder.mkdir(parents=True, exist_ok=True)
+        out_ext = ".feature"
+    elif output_format == "markdown":
+        prompt = f"""
+You are an expert in writing Gauge BDD specification files in Markdown format.
+Organize and rewrite the following content as a clean, well-formatted Gauge spec file.
+- Use correct Gauge Markdown syntax (e.g., # Specification, ## Scenario, steps, tables, etc.).
+- Ensure all steps and examples are properly aligned and indented.
+- Do not include any explanations or markdown code fences.
+- Highlight any parameters in the steps using double quotes.
+- Only output the .spec file content.
 
+Content:
+---
+{input_content}
+---
+"""
+        out_folder = Path("markdown")
+        out_folder.mkdir(parents=True, exist_ok=True)
+        out_ext = ".spec"
+    else:
+        raise ValueError("Unsupported output format: must be 'gherkin' or 'markdown'")
+
+    # Call the LLM to organize the content
     try:
         response = together_client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2
         )
-        env_guess = response.choices[0].message.content.strip().upper()
-        time.sleep(1)
-
-        print(f"Inferred Environment: {env_guess}")
-        return env_guess
+        time.sleep(1)  # Give some time to the LLM to process
+        organized_content = response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"LLM failed to infer environment: {e}")
-        return ""
+        print(f"[ERROR] LLM failed to convert file: {e}")
+        return None, None
 
-def confirm_or_select_environment(env_guess: str, prompt_key_file: str = "prompt_key.yaml") -> str:
-    print(f"LLM guessed the environment as: {env_guess}")
-    confirm = input("Do you want to use this environment? (yes/no): ").strip().lower()
+    # Determine output file name
+    base_name = input_path.stem
+    output_file_path = out_folder / f"{base_name}{out_ext}"
 
-    if confirm in ["yes", "y"]:
-        return env_guess
+    # Write the organized content to the output file
+    output_file_path.write_text(organized_content, encoding="utf-8")
 
-    # Else, user provides their own environment
-    user_env = input("Enter the correct environment name: ").strip().upper()
+    return str(output_file_path), organized_content
 
-    # Load YAML
-    with open(prompt_key_file, "r") as f:
-        prompt_data = yaml.safe_load(f) or {}
 
-    # If the new environment is not present, generate prompt keys using LLM
-    if user_env not in prompt_data:
-        print(f"Environment '{user_env}' not found in prompt_key.yaml. Generating prompt keys via LLM...")
+StepBody = namedtuple("StepBody", ["params", "code"])
 
-        prompt = f"""
-You are a test automation architect.
-
-A new environment '{user_env}' has been introduced. Please generate a list of prompt keys needed for this environment in the following YAML-compatible format:
-
-Each key should include:
-- key
-- description
-- type (string, integer, boolean, enum, json_string, file_path, key_value_pairs)
-- example
-- options (only if type is enum)
-
-Return the YAML for: {user_env}
-Only return valid YAML.
-"""
-        try:
-            response = together_client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
-            )
-            new_yaml_str = response.choices[0].message.content
-            time.sleep(1)
-
-            # Load newly generated keys from LLM output
-            new_env_data = yaml.safe_load(new_yaml_str)
-
-            # Merge into existing YAML
-            prompt_data.update(new_env_data)
-
-            # Save back to YAML
-            with open(prompt_key_file, "w") as f:
-                yaml.dump(prompt_data, f)
-
-            print(f"Prompt keys for '{user_env}' added to {prompt_key_file}.")
-
-        except Exception as e:
-            print(f"Failed to generate or write prompt keys: {e}")
-            return user_env  # Proceed, but assume keys might be empty
-
-    return user_env
-
-def load_and_collect_prompt_inputs(env_name: str, prompt_key_file: str = "prompt_key.yaml") -> dict:
-    print(f"\nLoading prompt keys for environment: {env_name}")
-
+def load_and_collect_prompt_inputs(env_name: str = "GENERIC", prompt_key_file: str = "prompt_key.yaml") -> dict:
     with open(prompt_key_file, "r") as f:
         prompt_data = yaml.safe_load(f)
 
@@ -268,10 +239,7 @@ def load_and_collect_prompt_inputs(env_name: str, prompt_key_file: str = "prompt
             print(f"Options: {options}")
         print(f"Example: {example}")
 
-        user_input = input(f"Enter value for `{key}` (or type `0` to skip): ").strip()
-
-        if user_input.lower() == "0":
-            continue
+        user_input = input(f"Enter `{key}` details: ").strip()
 
         user_inputs[key] = user_input
 
@@ -738,8 +706,8 @@ def write_code(framework, feature_content, code, feature_filename):
     feature_path.write_text(feature_content)
 
     if framework == "behave":
-        Path("features/steps").mkdir(parents=True, exist_ok=True)
-        path = Path("features/steps/step_definitions.py")
+        Path("behave/features/steps").mkdir(parents=True, exist_ok=True)
+        path = Path("behave/features/steps/step_definitions.py")
         path.write_text(code)
     elif framework == "godog":
         Path("godog").mkdir(parents=True, exist_ok=True)
@@ -881,28 +849,51 @@ def validate_code(code, framework):
 
 # --- Main Execution Controller ---
 def main():
-
-    # Step 1: Ask user for .feature file
-    feature_file_path = input("Enter path to the .feature file (highlight parameters in steps): ").strip()
-    feature_file_path = Path("features") / feature_file_path
-    if not feature_file_path.exists():
-        print(f"File {feature_file_path} not found.")
+    # Step 1: Ask user for input text file
+    input_text_path = input("Enter path to the input (text, .feature, or .spec): ").strip()
+    input_text_path = Path("Input_files") / input_text_path # It's in the Input_files directory
+    if not input_text_path.exists():
+        print(f"File {input_text_path} not found.")
         return
 
-    feature_content = Path(feature_file_path).read_text()
-
     # Step 2: Ask framework
-    framework = input("Choose framework (behave / godog / cucumber): ").strip().lower()
-    if framework not in {"behave", "godog", "cucumber"}:
+    framework = input("Choose framework (behave / godog / cucumber / gauge): ").strip().lower()
+    if framework not in {"behave", "godog", "cucumber", "gauge"}:
         print("Unsupported framework")
         return
 
-    # Step 3: Infer environment and get prompt inputs
-    inferred_env = infer_environment_with_llm(feature_content)
-    environment = confirm_or_select_environment(inferred_env)
-    prompt_inputs = load_and_collect_prompt_inputs(environment)
+    # Step 3: Map framework to output format
+    if framework in {"behave", "godog", "cucumber"}:
+        output_format = "gherkin"
+    elif framework == "gauge":
+        output_format = "markdown"
+    else:
+        print("Unsupported framework")
+        return
 
-    # Step 4: Extract steps
+    # Step 4: Handle input file type
+    if input_text_path.suffix.lower() in [".feature", ".spec"]:
+        # User provided a BDD file directly
+        feature_content = input_text_path.read_text(encoding="utf-8")
+        # Optionally, send to LLM for reformatting/organization
+        print("Sending existing BDD file to LLM for better organization...")
+        output_file_path, feature_content = convert_text_to_bdd_file(input_text_path, output_format)
+        if not output_file_path or not Path(output_file_path).exists():
+            print("Failed to process BDD file with LLM.")
+            return
+    else:
+        # User provided a plain text file, convert as before
+        output_file_path, feature_content = convert_text_to_bdd_file(input_text_path, output_format)
+        if not output_file_path or not Path(output_file_path).exists():
+            print("Failed to generate BDD file from input text.")
+            return
+
+    feature_file_path = Path(output_file_path)
+
+    # Step 5: Infer environment and get prompt inputs
+    prompt_inputs = load_and_collect_prompt_inputs("GENERIC")
+
+    # Step 6: Extract steps
     available_context_vars = {}  # Tracks context variables and optional descriptions
 
     scenarios_data = parse_feature_by_scenario(feature_content)
@@ -914,16 +905,18 @@ def main():
     for scenario in scenarios_data:
         print(f"\nProcessing Scenario: {scenario['title']}")
         for step_text in scenario["steps"]:
-
+            step_command = input(f"Enter the command required for this step:\n  \"{step_text}\"\n(or leave blank if not applicable): ").strip()
             # Pass available_context_vars to LLM
             prompt_inputs_with_context = dict(prompt_inputs)
+            if step_command:
+                prompt_inputs_with_context["step_command"] = step_command
             prompt_inputs_with_context["available_context"] = available_context_vars
 
             step_data = generate_step_metadata(
                 step_text=step_text,
                 framework=framework,
                 prompt_inputs=prompt_inputs_with_context,
-                environment=environment,
+                environment="GENERIC",
                 scenario_content=scenario["content"],
                 full_feature_content=feature_content, # Pass full feature content
                 previous_step_error=None # No per-step retry currently, so always None
@@ -952,7 +945,7 @@ def main():
             all_custom_imports.update(step_data.get("imports", []))
 
 
-    # Step 5 & 6 (Combined): Generate and Validate Code with Retry
+    # Step 7: Generate and Validate Code with Retry
     final_generated_code = None
     is_valid_code = False
     validation_error_message = None # Initialize to None
@@ -991,16 +984,17 @@ def main():
     if not is_valid_code:
         print("\n Final code validation failed after 3 attempts.")
         print("Last encountered error:\n" + validation_error_message)
+        write_code(framework, feature_content, final_generated_code, Path(feature_file_path).name)
         return
 
-    
-    # Step 7: Write to file
+       
+    # Step 8: Write to file
     write_code(framework, feature_content, final_generated_code, Path(feature_file_path).name)
 
-    # Step 8: Run tests
+    # Step 9: Run tests
     print(f"Running {framework} tests...")
     if framework == "behave":
-        subprocess.run(["behave", "features", "-f", "json.pretty", "-o", "report_behave.json"])
+        subprocess.run(["behave", f"../features/{Path(feature_file_path).name}", "-f", "json.pretty", "-o", "report_behave.json"])
     elif framework == "godog":
         subprocess.run(["go", "test", "./godog", "-v"])
     elif framework == "cucumber":
