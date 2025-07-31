@@ -1,0 +1,28 @@
+# config.yaml
+# Environment and Command Definitions for LLM and Test Execution
+environment:
+  kubectl_binary_path: "kubectl"     # Path to kubectl executable
+  default_namespace: "default"       # Default Kubernetes namespace
+
+# Command Templates: LLM will use these to generate actual commands.
+# Parameters in {curly_braces} will be filled by the generated code.
+commands:
+  get_minikube_status: "minikube status"
+  get_pod_json_by_label: "{kubectl_binary_path} get pod -l {label} -o json -n {namespace}"
+
+# Expected Output Baselines: For 'Then' step validation.
+# The LLM will use this JSON structure for assertions.
+expected_outputs:
+  pod_running_status_json: |
+    {
+      "items": [
+        {
+          "status": "Running"
+        },
+        "metadata": {
+          "labels": {
+            "app": "flask-api"
+          }
+        }
+      ]
+    }
