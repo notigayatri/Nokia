@@ -102,6 +102,17 @@ public class StepDefinitions {
     public static String lastApiResponse;
     public static int lastResponseStatusCode;
 
+    // Example: Load config file using user-provided filename
+    public static JsonNode testConfig;
+    static {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            InputStream in = StepDefinitions.class.getClassLoader().getResourceAsStream("{{ user_config_filename }}");
+            testConfig = mapper.readTree(in);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load config file: {{ user_config_filename }}", e);
+        }
+    }
     {% for step in steps %}
     @{{ step.gherkin_keyword.lower() | capitalize }}("{{ step.step_text | escape_java_regex }}")
     public void {{ step.func_name }}({% if step.parameters %}{% for param in step.parameters %}String {{ param }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}) {
@@ -370,20 +381,19 @@ Content:
 StepBody = namedtuple("StepBody", ["params", "code"])
 
 # RENAMED and MODIFIED to load from file
-def load_test_config(config_path: str = "config.yaml") -> dict:
-    """Loads test configuration from a YAML file."""
-    try:
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
-        print(f"\nLoaded test configuration from {config_path}")
-        return config
-    except FileNotFoundError:
-        print(f"Error: Configuration file '{config_path}' not found.")
-        return {}
-    except yaml.YAMLError as e:
-        print(f"Error parsing configuration file '{config_path}': {e}")
-        return {}
-
+def load_test_config(filename="config.yaml", start_path=None):
+    """
+    Search upwards from the current script or a provided path to find and load config.yaml.
+    """
+    start = Path(start_path or __file__).resolve()
+    for path in [start] + list(start.parents):
+        config_file = path / filename
+        if config_file.is_file():
+            with open(config_file, "r") as f:
+                print(f"Loaded test configuration from: {config_file}")
+                return yaml.safe_load(f)
+    print(f"Config file '{filename}' not found from path {start}")
+    return None
 
 def extract_steps_from_feature(feature_content: str) -> list[str]:
     """
@@ -441,7 +451,7 @@ def format_step_for_framework(step_text: str, framework: str):
         param_names.append(name)
 
         if framework == "behave":
-            parts.append(f"{{{name}}}") # Behave's format
+            parts.append(f'"{{{name}}}"') # Behave's format with quotes
         elif framework == "cucumber":
             # For Cucumber, use {string} for quoted strings or a more specific type if known
             # Using {string} allows Cucumber to handle the parameter extraction
@@ -488,8 +498,6 @@ def parse_feature_by_scenario(feature_content: str):
         })
     return scenarios
 
-# NOTE: extract_context_vars_from_logic is not strictly needed anymore if LLM is explicitly managing shared vars
-# But keeping it if you want to inspect LLM output.
 def extract_context_vars_from_logic(logic: str) -> set:
     return set(re.findall(r"context\.([a-zA-Z_][a-zA-Z0-9_]*)", logic))
 
@@ -649,7 +657,7 @@ def generate_step_metadata(step_text: str, framework: str, test_config: dict, sc
         print(f"[LLM Error] Failed to generate logic for step: {step_text}\nDetails: {e}")
         return None
 
-def generate_framework_code(all_step_metadata, framework, custom_imports, scenario_context_fields):
+def generate_framework_code(all_step_metadata, framework, custom_imports, scenario_context_fields, user_config_filename=None):
     if framework == "behave":
         return behave_template.render(
             step_imports=custom_imports,
@@ -694,15 +702,16 @@ def generate_framework_code(all_step_metadata, framework, custom_imports, scenar
                     "gherkin_keyword": step["gherkin_keyword"]
                 }
                 for step in all_step_metadata
-            ]
+            ],
+            user_config_filename=user_config_filename,  # Placeholder for user config filename
         )
 
     else:
         raise ValueError(f"Unsupported framework: {framework}")
 
 # Write code to appropriate folders
-def write_code(framework, feature_content, code, feature_filename):
-    # This writes the feature file to the root `features` directory
+def write_code(framework, feature_content, code, feature_filename, config_path=None, user_config_filename=None):
+    # This writes the feature file to the root `features` directorys
     # The framework-specific writing handles copying it into its project structure
     feature_path = Path("features") / feature_filename
     Path("features").mkdir(parents=True, exist_ok=True)
@@ -712,6 +721,15 @@ def write_code(framework, feature_content, code, feature_filename):
         Path("behave/features/steps").mkdir(parents=True, exist_ok=True)
         path = Path("behave/features/steps/step_definitions.py")
         path.write_text(code)
+        env_py = Path("behave/features/environment.py")
+        env_py.write_text(
+            "import yaml\n"
+            "import os\n"
+            "def before_all(context):\n"
+            "    config_path = os.path.join(os.path.dirname(__file__), '..', 'config.yaml')\n"
+            "    with open(config_path, 'r') as f:\n"
+            "        context.test_config = yaml.safe_load(f)\n"
+        )
     elif framework == "godog":
         Path("godog").mkdir(parents=True, exist_ok=True)
         path = Path("godog/main_test.go")
@@ -730,6 +748,10 @@ def write_code(framework, feature_content, code, feature_filename):
         (runner_dir / "TestRunner.java").write_text(cucumber_runner_template.render())
         (base / "pom.xml").write_text(pom_template.render())
         (features_dir / feature_filename).write_text(feature_content)
+        
+        resources_config_path = Path("cucumber/src/test/resources") / user_config_filename
+        resources_config_path.parent.mkdir(parents=True, exist_ok=True)
+        resources_config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
 
     return feature_path
 
@@ -851,6 +873,13 @@ def main():
         print(f"File {input_text_path} not found.")
         return
 
+    config_path_str = input("Enter path to your environment details file: ").strip()
+    config_path = Path(config_path_str)
+    if not config_path.exists():
+        print(f"Config file {config_path} not found.")
+        return
+    
+    user_config_filename = config_path.name
     # Step 2: Ask framework (removed Gauge as a framework for code generation, kept as output format)
     framework = input("Choose framework (behave / godog / cucumber): ").strip().lower()
     if framework not in {"behave", "godog", "cucumber"}:
@@ -877,11 +906,21 @@ def main():
     print(f"\n--- Generated/Organized Feature Content ---\n{feature_content}\n---------------------------------------\n")
 
 
-    # Step 5: Load Test Configuration (NEW: from config.yaml)
-    test_config = load_test_config("config.yaml")
-    if not test_config:
-        print("Failed to load test configuration. Exiting.")
+    # Step 5: Load Test Configuration (from project root or nearest parent)
+    if framework == "behave":
+        framework_config_path = Path("behave") /  user_config_filename
+    elif framework == "godog":
+        framework_config_path = Path("godog") / user_config_filename
+    elif framework == "cucumber":
+        framework_config_path = Path("cucumber") / user_config_filename
+    else:
+        print("Unsupported framework.")
         return
+
+    framework_config_path.parent.mkdir(parents=True, exist_ok=True)
+    framework_config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    test_config = load_test_config(filename=user_config_filename, start_path=framework_config_path.parent)
 
     # Step 6: Parse Feature by Scenario and Generate Step Metadata
     scenarios_data = parse_feature_by_scenario(feature_content)
@@ -934,7 +973,8 @@ def main():
             all_step_metadata=all_step_metadata,
             framework=framework,
             custom_imports=sorted(list(all_custom_imports)),
-            scenario_context_fields=sorted(list(all_godog_fields)) # Pass collected Go fields
+            scenario_context_fields=sorted(list(all_godog_fields)),
+            user_config_filename=user_config_filename  # Pass user config filename
         )
 
         # Call the final LLM autocorrection on the generated code
@@ -964,10 +1004,10 @@ def main():
         
     # Step 8: Write to file
     print("\nWriting generated code to project structure...")
-    write_code(framework, feature_content, final_generated_code, feature_filename)
+    write_code(framework, feature_content, final_generated_code, feature_filename, config_path, user_config_filename)
     print("Code written successfully.")
 
-    # Step 9: Run tests and validate (NEW LOGIC FOR CUCUMBER)
+    # Step 9: Run tests and validate 
     print(f"\nRunning {framework} tests...")
     test_run_success = False
     if framework == "behave":
@@ -1011,7 +1051,11 @@ def main():
                     for feature in report_data:
                         for scenario in feature.get('elements', []):
                             total_scenarios += 1
-                            if scenario.get('status') == 'failed':
+                            scenario_failed = any(
+                                step.get('result', {}).get('status') == 'failed'
+                                for step in scenario.get('steps', [])
+                            )
+                            if scenario_failed:
                                 failed_scenarios += 1
                     
                     if failed_scenarios == 0 and total_scenarios > 0:
