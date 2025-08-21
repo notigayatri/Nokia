@@ -1,0 +1,26 @@
+# config.yaml
+# Configuration for the User API BDD tests
+
+# Environment details: Used in 'Given' steps.
+environment:
+  api_base_url: "http://localhost:5000"
+
+# Command Templates: Used in 'When' steps.
+# Each key corresponds to an API action/endpoint.
+commands:
+  get_all_users: "{api_base_url}/users"
+  get_user_by_id: "{api_base_url}/users/{user_id}"
+  add_new_user: "{api_base_url}/users"        # Will be used with POST + JSON body
+
+# Expected Outputs: Used in 'Then' steps.
+# Keep assertions modular so each scenario can pick relevant ones.
+expected_outputs:
+  status_codes:
+    successful_get: 200
+    successful_post: 201
+    not_found: 404
+    bad_request: 400
+
+  json_paths:
+    user_id: "id"
+    user_name: "name"

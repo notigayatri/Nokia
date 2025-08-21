@@ -8,7 +8,7 @@ import tempfile
 import subprocess
 from pathlib import Path
 from jinja2 import Template, Environment
-import together
+from openai import OpenAI
 import yaml
 import hashlib
 import textwrap
@@ -17,8 +17,11 @@ from collections import namedtuple
 load_dotenv() # Load environment variables from .env file
 
 # Initialize Together AI client
-together_client = together.Together(api_key=os.getenv("TOGETHER_API_KEY"))
-LLM_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free" # Using your preferred model
+client = OpenAI(
+    api_key=os.getenv("PERPLEXITY_API_KEY"),
+    base_url="https://api.perplexity.ai"
+)
+LLM_MODEL = "sonar-pro" # Using your preferred model
 
 def escape_java_regex(value: str) -> str:
     value = value.replace('\\', '\\\\')       # escape backslashes
@@ -80,14 +83,11 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 ''')
 
 cucumber_step_template = env.from_string('''package stepdefinitions;
+
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.When;
 import io.cucumber.java.en.Then;
 import org.junit.Assert;
-// Add this for JSON comparison
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.JsonNode;
-
 
 // Custom imports for step definitions
 {% for line in custom_imports %}
@@ -95,24 +95,6 @@ import {{ line }};
 {% endfor %}
 
 public class StepDefinitions {
-
-    // Shared state variables for Cucumber/Java
-    // The LLM should be instructed to use these or declare its own if needed.
-    public static String lastCommandOutput;
-    public static String lastApiResponse;
-    public static int lastResponseStatusCode;
-
-    // Example: Load config file using user-provided filename
-    public static JsonNode testConfig;
-    static {
-        try {
-            ObjectMapper mapper = new ObjectMapper();
-            InputStream in = StepDefinitions.class.getClassLoader().getResourceAsStream("{{ user_config_filename }}");
-            testConfig = mapper.readTree(in);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to load config file: {{ user_config_filename }}", e);
-        }
-    }
     {% for step in steps %}
     @{{ step.gherkin_keyword.lower() | capitalize }}("{{ step.step_text | escape_java_regex }}")
     public void {{ step.func_name }}({% if step.parameters %}{% for param in step.parameters %}String {{ param }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}) {
@@ -121,6 +103,31 @@ public class StepDefinitions {
     {% endfor %}
 }
 ''')
+
+cucumber_env_template = """
+package stepdefinitions;
+
+import io.cucumber.java.Before;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Properties;
+
+public class Hooks {
+    public static Properties config;
+
+    @Before(order = 0)
+    public void loadConfig() throws IOException {
+        if (config == null) {
+            String userConfigFilename = "{{ user_config_filename }}";
+            config = new Properties();
+            try (FileInputStream fis = new FileInputStream("src/test/resources/" + userConfigFilename)) {
+                config.load(fis);
+            }
+            System.out.println("Loaded config file: " + userConfigFilename);
+        }
+    }
+}
+"""
 
 cucumber_runner_template = Template('''package runner;
 
@@ -149,8 +156,13 @@ pom_template = Template('''<project xmlns="http://maven.apache.org/POM/4.0.0"
     <dependency>
       <groupId>io.cucumber</groupId>
       <artifactId>cucumber-java</artifactId>
-      <version>7.14.0</version>
+      <version>7.15.0</version>
       <scope>test</scope>
+    </dependency>
+    <dependency>
+        <groupId>org.yaml</groupId>
+        <artifactId>snakeyaml</artifactId>
+        <version>2.2</version>
     </dependency>
     <dependency>
       <groupId>io.cucumber</groupId>
@@ -168,6 +180,18 @@ pom_template = Template('''<project xmlns="http://maven.apache.org/POM/4.0.0"
         <groupId>com.fasterxml.jackson.core</groupId>
         <artifactId>jackson-databind</artifactId>
         <version>2.16.1</version>
+        <scope>test</scope>
+    </dependency>
+    <dependency>
+        <groupId>io.rest-assured</groupId>
+        <artifactId>rest-assured</artifactId>
+        <version>5.4.0</version>
+        <scope>test</scope>
+    </dependency>
+    <dependency>
+        <groupId>org.json</groupId>
+        <artifactId>json</artifactId>
+        <version>20230227</version>
         <scope>test</scope>
     </dependency>
     <dependency>
@@ -296,7 +320,7 @@ Available test configuration (JSON format):
 9.  Parse responses carefully, avoid hardcoding outputs.
 10. Validate runtime output before comparing or asserting.
 11. Do not access the `test_config` directly in code — it's passed as a JSON string to the LLM for context. Instead, assume the LLM generates a Java Map/Object to parse this JSON config if it needs to use values from it. (Self-correction: The LLM can be instructed to directly parse the string or, better, we can inject a `testConfig` object if we manage to create it from the JSON. For simplicity, I've kept it as `tojson` for the LLM to process and generate parsing code. This is a common challenge with LLM code gen.)
-12. **Do NOT include any surrounding class declarations, package declarations, or extra methods or unused imports or unused variables.**
+12. **Do NOT include any surrounding class declarations, package declarations, or extra methods or unused imports or unused variables or deprecated commands, use valid class names and structures.**
 {% if previous_step_error %}
 Previous attempt for this step failed with this error. Please fix:
 {{ previous_step_error }}
@@ -357,7 +381,7 @@ Content:
 
     # Call the LLM to organize the content
     try:
-        response = together_client.chat.completions.create(
+        response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2
@@ -431,6 +455,8 @@ def format_step_for_framework(step_text: str, framework: str):
         static_part = text_for_pattern[last_end:match.start()]
 
         # Static parts for Godog need escaping. For Cucumber, they are literal.
+        if framework == "cucumber":
+            static_part = static_part.replace("/", "\\/")
         if framework == "godog":
             parts.append(re.escape(static_part).replace(r'\ ', ' '))
         else: # For behave and cucumber, just append the literal static part
@@ -462,6 +488,9 @@ def format_step_for_framework(step_text: str, framework: str):
         last_end = match.end()
 
     remaining_part = text_for_pattern[last_end:]
+
+    if framework == "cucumber":
+        remaining_part = remaining_part.replace("/", "\\/")
     if framework == "godog":
         parts.append(re.escape(remaining_part).replace(r'\ ', ' '))
     else: # For behave and cucumber, just append the literal remaining part
@@ -584,7 +613,7 @@ def generate_step_metadata(step_text: str, framework: str, test_config: dict, sc
     )
 
     try:
-        response = together_client.chat.completions.create(
+        response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": logic_prompt}],
             temperature=0.4
@@ -708,7 +737,15 @@ def generate_framework_code(all_step_metadata, framework, custom_imports, scenar
 
     else:
         raise ValueError(f"Unsupported framework: {framework}")
-
+    
+env_template = """
+import yaml
+import os
+def before_all(context):
+    config_path = os.path.join(os.path.dirname(__file__), '{user_config_filename}')
+    with open(config_path, 'r') as f:
+        context.test_config = yaml.safe_load(f)
+"""
 # Write code to appropriate folders
 def write_code(framework, feature_content, code, feature_filename, config_path=None, user_config_filename=None):
     # This writes the feature file to the root `features` directorys
@@ -716,20 +753,30 @@ def write_code(framework, feature_content, code, feature_filename, config_path=N
     feature_path = Path("features") / feature_filename
     Path("features").mkdir(parents=True, exist_ok=True)
     feature_path.write_text(feature_content)
-
+    
     if framework == "behave":
-        Path("behave/features/steps").mkdir(parents=True, exist_ok=True)
-        path = Path("behave/features/steps/step_definitions.py")
+        # Create directories
+        behave_features_dir = Path("behave/features")
+        behave_steps_dir = behave_features_dir / "steps"
+        behave_features_dir.mkdir(parents=True, exist_ok=True)
+        behave_steps_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write the step definitions file
+        path = behave_steps_dir / "step_definitions.py"
         path.write_text(code)
-        env_py = Path("behave/features/environment.py")
-        env_py.write_text(
-            "import yaml\n"
-            "import os\n"
-            "def before_all(context):\n"
-            "    config_path = os.path.join(os.path.dirname(__file__), '..', 'config.yaml')\n"
-            "    with open(config_path, 'r') as f:\n"
-            "        context.test_config = yaml.safe_load(f)\n"
-        )
+
+        # Corrected file copy logic
+        if config_path and user_config_filename:
+            destination_config_path = behave_features_dir / user_config_filename
+            # Read from source path and write to destination path
+            destination_config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"Copied config file to: {destination_config_path}")
+
+        # Update environment.py to look for the config file in the correct directory
+        env_py = behave_features_dir / "environment.py"
+        rendered_env_template = env_template.format(user_config_filename=user_config_filename)
+        env_py.write_text(rendered_env_template)
+
     elif framework == "godog":
         Path("godog").mkdir(parents=True, exist_ok=True)
         path = Path("godog/main_test.go")
@@ -739,20 +786,26 @@ def write_code(framework, feature_content, code, feature_filename, config_path=N
         stepdefs_dir = base / "src/test/java/stepdefinitions"
         runner_dir = base / "src/test/java/runner"
         features_dir = base / "src/test/resources/features"
+        resources_dir = base / "src/test/resources"
 
         stepdefs_dir.mkdir(parents=True, exist_ok=True)
         runner_dir.mkdir(parents=True, exist_ok=True)
         features_dir.mkdir(parents=True, exist_ok=True)
+        resources_dir.mkdir(parents=True, exist_ok=True)
 
         (stepdefs_dir / "StepDefinitions.java").write_text(code)
         (runner_dir / "TestRunner.java").write_text(cucumber_runner_template.render())
         (base / "pom.xml").write_text(pom_template.render())
         (features_dir / feature_filename).write_text(feature_content)
         
-        resources_config_path = Path("cucumber/src/test/resources") / user_config_filename
-        resources_config_path.parent.mkdir(parents=True, exist_ok=True)
-        resources_config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+        # Copy the config file into the resources directory
+        if config_path and user_config_filename:
+            root_config_path = resources_dir / user_config_filename
+            root_config_path.write_text(Path(config_path).read_text(encoding="utf-8"), encoding="utf-8")
 
+            # Generate Hooks.java (auto-loads config file before scenarios)
+            rendered_hooks = cucumber_env_template.replace("{{ user_config_filename }}", user_config_filename)
+            (stepdefs_dir / "Hooks.java").write_text(rendered_hooks)
     return feature_path
 
 def final_llm_autocorrect_code(feature_content: str, step_code: str, framework: str, previous_error: str = None) -> str:
@@ -785,84 +838,187 @@ Step Definitions File:
         prompt += f"\n\nPrevious validation failed with this error. Please fix:\n{previous_error}"
 
     try:
-        response = together_client.chat.completions.create(
+        response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
         time.sleep(1) # Added sleep to help with rate limits
-        return response.choices[0].message.content.strip()
+        code = response.choices[0].message.content.strip()
+        
+        # Strip any accidental markdown code fences for ALL frameworks
+        if code.startswith("```"):
+            code = re.sub(r"^```[a-zA-Z]*\s*", "", code)  # remove opening fence
+            code = re.sub(r"```$", "", code)              # remove closing fence
+            code = code.strip()
+        return code
+
     except Exception as e:
         print(f"[ERROR] Final LLM correction failed: {e}")
         return step_code  # Return original if LLM fails
 
-def validate_code(code, framework):
+def validate_code(code, framework, config_path=None, user_config_filename=None, feature_file_path=None):
     try:
         if framework == 'behave': # Python validation
-            # Validate syntax using AST
-            try:
-                ast.parse(code)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                base_path = Path(temp_dir)
+                features_dir = base_path / "features"
+                steps_dir = features_dir / "steps"
+                
+                steps_dir.mkdir(parents=True, exist_ok=True)
+                
+                (steps_dir / "step_definitions.py").write_text(code)
+                env_py = features_dir / "environment.py"
+                rendered_env_template = env_template.format(user_config_filename=user_config_filename)
+                env_py.write_text(rendered_env_template)
+
+                # Copy the config file to the temporary features directory so Behave can find it
+                if config_path and user_config_filename and Path(config_path).exists():
+                    temp_config_path = features_dir / user_config_filename
+                    temp_config_path.write_text(Path(config_path).read_text(encoding="utf-8"))
+                    print(f"Copied config file to temp directory: {temp_config_path}")
+                elif user_config_filename:
+                    print(f"[ERROR] Config file path not found for validation: {config_path}")
+                    return False, "Config file not found for validation."
+
+
+                # Use the actual feature file for validation ---
+                if feature_file_path and Path(feature_file_path).exists():
+                    actual_feature_file = Path(feature_file_path)
+                    (features_dir / actual_feature_file.name).write_text(actual_feature_file.read_text(encoding="utf-8"))
+                else:
+                    # Fallback to a minimal feature file if the actual one is not provided or found
+                    (features_dir / "temp.feature").write_text("Feature: Temp\n  Scenario: Temp\n    Given a temp step")
+
+
+                # --- STEP 1: Static Check (Optional but good practice) ---
+                try:
+                    ast.parse(code)
+                except SyntaxError as e:
+                    return False, f"Python syntax error: {str(e)}"
+
+                # --- STEP 2: Runtime Test Execution Check ---
+                # Execute the 'behave' command to run the tests
+                behave_cmd = ["behave", "--no-color", "--no-summary", "--no-skipped", str(features_dir)]
+                test_result = subprocess.run(
+                    behave_cmd,
+                    cwd=base_path,
+                    capture_output=True,
+                    text=True,
+                    shell=False
+                )
+                
+                # 'behave' returns a non-zero exit code on failure
+                if test_result.returncode != 0:
+                    return False, f"Behave test runtime error detected:\n{test_result.stdout + test_result.stderr}"
+
                 return True, None
-            except SyntaxError as e:
-                return False, f"Python syntax error: {str(e)}"
 
         elif framework == 'godog': # Go validation
             with tempfile.NamedTemporaryFile(delete=False, suffix=".go", mode='w') as temp_file:
                 temp_file.write(code)
                 temp_file_path = temp_file.name
 
-            fmt_result = subprocess.run(["gofmt", "-l", temp_file_path],
-                                         capture_output=True, text=True)
-            if fmt_result.returncode != 0 or fmt_result.stdout.strip():
-                os.remove(temp_file_path)
-                return False, f"Go formatting or syntax error detected by gofmt: {fmt_result.stderr.strip() or fmt_result.stdout.strip()}"
+            try:
+                # --- STEP 1: Static Analysis Checks ---
+                # Go formatting check
+                fmt_result = subprocess.run(["gofmt", "-l", temp_file_path], capture_output=True, text=True)
+                if fmt_result.returncode != 0 or fmt_result.stdout.strip():
+                    return False, f"Go formatting or syntax error detected by gofmt: {fmt_result.stderr.strip() or fmt_result.stdout.strip()}"
 
-            vet_result = subprocess.run(["go", "vet", temp_file_path],
-                                         capture_output=True, text=True)
-            if vet_result.returncode != 0:
-                os.remove(temp_file_path)
-                return False, f"Go static analysis error detected by go vet: {vet_result.stderr.strip()}"
+                # Go static analysis check
+                vet_result = subprocess.run(["go", "vet", temp_file_path], capture_output=True, text=True)
+                if vet_result.returncode != 0:
+                    return False, f"Go static analysis error detected by go vet: {vet_result.stderr.strip()}"
 
-            build_result = subprocess.run(["go", "build", "-o", os.devnull, temp_file_path],
-                                             capture_output=True, text=True)
-            if build_result.returncode != 0:
-                os.remove(temp_file_path)
-                return False, f"Go compilation error detected by go build: {build_result.stderr.strip()}"
+                # Go compilation check
+                build_result = subprocess.run(["go", "build", "-o", os.devnull, temp_file_path], capture_output=True, text=True)
+                if build_result.returncode != 0:
+                    return False, f"Go compilation error detected by go build: {build_result.stderr.strip()}"
 
-            os.remove(temp_file_path) # Clean up temporary file
-            return True, None
+                # --- STEP 2: Runtime Test Execution Check ---
+                test_result = subprocess.run(["go", "test", temp_file_path], capture_output=True, text=True)
+                if test_result.returncode != 0:
+                    return False, f"Go test runtime error detected:\n{test_result.stdout + test_result.stderr}"
 
-        elif framework == 'cucumber':
+                return True, None
+            finally:
+                os.remove(temp_file_path) # Clean up temporary file
+        elif framework == 'cucumber': # Java validation
             with tempfile.TemporaryDirectory() as temp_dir:
                 base_path = Path(temp_dir)
                 stepdefs_dir = base_path / "src/test/java/stepdefinitions"
                 runner_dir = base_path / "src/test/java/runner"
                 features_dir = base_path / "src/test/resources/features"
+                resources_dir = base_path / "src/test/resources"
 
                 stepdefs_dir.mkdir(parents=True, exist_ok=True)
                 runner_dir.mkdir(parents=True, exist_ok=True)
                 features_dir.mkdir(parents=True, exist_ok=True)
+                resources_dir.mkdir(parents=True, exist_ok=True)
 
+                # Step definitions
                 (stepdefs_dir / "StepDefinitions.java").write_text(code)
+
+                # Hooks.java (environment equivalent)
+                if user_config_filename:
+                    rendered_hooks = cucumber_env_template.replace("{{ user_config_filename }}", user_config_filename)
+                    (stepdefs_dir / "Hooks.java").write_text(rendered_hooks)
+
+                # Runner + pom.xml
                 (runner_dir / "TestRunner.java").write_text(cucumber_runner_template.render())
                 (base_path / "pom.xml").write_text(pom_template.render())
-                # A minimal feature file is needed for Maven compilation to succeed
-                (features_dir / "temp.feature").write_text("Feature: Temp\n  Scenario: Temp\n    Given a temp step")
 
-                compile_result = subprocess.run(["mvn", "compile"], cwd=base_path, capture_output=True, text=True, shell=False) # Changed shell=False for security and portability
-                
+                # Feature file
+                if feature_file_path and Path(feature_file_path).exists():
+                    actual_feature_file = Path(feature_file_path)
+                    (features_dir / actual_feature_file.name).write_text(actual_feature_file.read_text(encoding="utf-8"))
+                else:
+                    (features_dir / "temp.feature").write_text("Feature: Temp\n  Scenario: Temp\n    Given a temp step")
+
+                # Config file
+                if config_path and user_config_filename:
+                    root_config_path = resources_dir / user_config_filename
+                    if Path(config_path).exists():
+                        root_config_path.write_text(Path(config_path).read_text(encoding="utf-8"), encoding="utf-8")
+                    else:
+                        return False, f"Config file {config_path} does not exist."
+
+                # --- STEP 1: Compile Check (Static Analysis) ---
+                mvn_cmd = r"C:\Program Files\apache-maven-3.9.10\bin\mvn.cmd"
+                compile_result = subprocess.run(
+                    [mvn_cmd, "compile"],
+                    cwd=base_path,
+                    capture_output=True,
+                    text=True,
+                    shell=False
+                )
                 if compile_result.returncode != 0:
                     error_output = compile_result.stderr.strip() or compile_result.stdout.strip()
                     return False, f"Java compilation error detected by Maven:\n{error_output}"
-            
-            return True, None
+                
+                # --- STEP 2: Test Execution (Runtime Check) ---
+                test_result = subprocess.run(
+                    [mvn_cmd, "test"],
+                    cwd=base_path,
+                    capture_output=True,
+                    text=True,
+                    shell=False
+                )
+                
+                if test_result.returncode != 0:
+                    if "T E S T S" in test_result.stdout:
+                        return False, f"Test runtime error detected by Maven. Tests failed:\n{test_result.stdout + test_result.stderr}"
+                    else:
+                        return False, f"Maven test execution failed with return code {test_result.returncode}. Output:\n{test_result.stdout + test_result.stderr}"
+
+                return True, None
 
         else:
             return False, f"Unsupported framework: {framework}"
 
     except Exception as e:
         return False, f"An unexpected error occurred during validation: {str(e)}"
-
 
 # --- Main Execution Controller ---
 def main():
@@ -907,20 +1063,7 @@ def main():
 
 
     # Step 5: Load Test Configuration (from project root or nearest parent)
-    if framework == "behave":
-        framework_config_path = Path("behave") /  user_config_filename
-    elif framework == "godog":
-        framework_config_path = Path("godog") / user_config_filename
-    elif framework == "cucumber":
-        framework_config_path = Path("cucumber") / user_config_filename
-    else:
-        print("Unsupported framework.")
-        return
-
-    framework_config_path.parent.mkdir(parents=True, exist_ok=True)
-    framework_config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    test_config = load_test_config(filename=user_config_filename, start_path=framework_config_path.parent)
+    test_config = load_test_config(filename=user_config_filename, start_path=config_path.parent)
 
     # Step 6: Parse Feature by Scenario and Generate Step Metadata
     scenarios_data = parse_feature_by_scenario(feature_content)
@@ -986,7 +1129,7 @@ def main():
         )
 
         # Validate the final code
-        is_valid_code, validation_error_message = validate_code(final_generated_code, framework)
+        is_valid_code, validation_error_message = validate_code(final_generated_code, framework, config_path, user_config_filename, feature_file_path)
 
         if is_valid_code:
             print(f"Code validated successfully on attempt {attempt+1}.")
@@ -1015,7 +1158,7 @@ def main():
         behave_dir = Path("behave")
         behave_features_dir = behave_dir / "features"
         behave_steps_dir = behave_features_dir / "steps"
-        behave_report_path = behave_dir / "report_behave.json"
+        behave_report_path = Path("report_behave.json")
 
         # Ensure behave/features and steps exist
         behave_features_dir.mkdir(parents=True, exist_ok=True)
@@ -1096,12 +1239,13 @@ def main():
     elif framework == "cucumber":
         cucumber_project_path = Path("cucumber")
         # Use `mvn clean test` to compile and run tests
+        mvn_cmd = r"C:\Program Files\apache-maven-3.9.10\bin\mvn.cmd"
         result = subprocess.run(
-            ["mvn", "clean", "test"],
+            [mvn_cmd, "clean", "test"],
             cwd=cucumber_project_path,
             capture_output=True,
             text=True,
-            shell=False # Prefer not to use shell=True unless necessary for command parsing
+            shell=False
         )
 
         print("\n--- Maven Build and Test Output ---")

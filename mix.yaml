@@ -1,0 +1,36 @@
+# config.yaml
+# Unified configuration for both API and Kubernetes test scenarios.
+
+environment:
+  # --- API Environment ---
+  api_base_url: "http://localhost:5000"  # Base URL for the User API
+
+  # --- Kubernetes Environment ---
+  default_namespace: "default"           # Default namespace for k8s commands
+  minikube_context: "minikube"           # Optional: context for validation
+
+commands:
+  # --- API Commands ---
+  get_all_users: "{api_base_url}/users"
+  get_user_by_id: "{api_base_url}/users/{user_id}"
+  create_user: "{api_base_url}/users"  # POST request with JSON body
+
+  # --- Kubernetes Commands ---
+  get_minikube_status: "minikube status"
+  get_pod_json_by_label: "kubectl get pod -l {label} -o json -n {namespace}"
+  get_pod_status_by_label: 'kubectl get pod -l {label} -o jsonpath="{{.items[0].status.phase}}" -n {namespace}'
+
+expected_outputs:
+  # --- API Expected Outputs ---
+  successful_status_code: 200
+  user_name_json_path: "name"
+  expected_users_in_list:
+    - "Alice"
+    - "Bob"
+
+  # --- Kubernetes Expected Outputs ---
+  successful_pod_status: "Running"
+  minikube_status_keywords:
+    - "Running"
+    - "Host: Running"
+    - "Kubelet: Running"
