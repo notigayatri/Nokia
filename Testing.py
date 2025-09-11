@@ -1,10 +1,13 @@
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 from langchain.agents import tool
 from langchain import hub
 from langchain.agents import create_react_agent, AgentExecutor
+from langchain_community.vectorstores import FAISS
+from langchain.schema import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter, Language
+
 
 import os
 import re
@@ -16,10 +19,11 @@ import tempfile
 import subprocess
 from pathlib import Path
 from jinja2 import Template, Environment
-from openai import OpenAI
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import yaml
 import hashlib
-import textwrap
+from functools import lru_cache
 from collections import namedtuple
 
 load_dotenv()
@@ -65,8 +69,13 @@ import yaml
 import os
 def before_all(context):
     config_path = os.path.join(os.path.dirname(__file__), '{user_config_filename}')
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found at: {{config_path}}")
+    
     with open(config_path, 'r') as f:
         context.test_config = yaml.safe_load(f)
+    
+    print(f"Loaded test configuration from: {{config_path}}")
 """
 
 godog_template = Template('''package main
@@ -293,45 +302,80 @@ You are a Python test automation expert using Behave. Your ONLY task is to write
 **THE ROLE OF A 'Then' STEP IS TO EXTRACT DATA FOR LATER VERIFICATION.**
 - For **Given/When** steps, generate code to interact with the system and store raw results in `context.lastCommandOutput`.
 - For **Then** steps, your job is to:
-    1. Create a descriptive, unique `lookupKey` in `camelCase` from the step text.
-    2. Extract the actual value from `context.lastCommandOutput`.
-    3. Write a single JSON file named `test_result.json` containing BOTH the `lookupKey` and the `actualValue`.
+    1.  **Generate a dynamic `lookupKey`** in `camelCase` from the Gherkin step's text.
+    2.  Use that key to **look up the `expected_value`** from `context.test_config['expected_outputs']`.
+    3.  Parse the raw output from `context.lastCommandOutput` to get the `actual_value`.
+    4.  Append a JSON object with these three values as a new line to `test_results.log`.
 
 ---
 **CRITICAL RULES:**
-1.  **YOUR RESPONSE MUST BE ONLY THE RAW PYTHON CODE FOR THE METHOD'S BODY.** Do not include the method signature, decorators, comments, or markdown.
-2.  **'Then' STEPS MUST NOT USE `assert`.** They only extract data.
-3.  **HOW TO WRITE THE JSON RESULT FILE (for a 'Then' step):**
-    *   You MUST use the following pattern, writing the file to the root of the project.
+1.  **YOUR RESPONSE MUST BE ONLY THE RAW PYTHON CODE FOR THE METHOD'S BODY.**
+2.  **'Then' STEPS MUST NOT USE `assert`.** They only extract and record data.
+- NEVER include Gherkin comments like `# language: python` in Python code
+3.  **PARAMETER HANDLING:**
+For 'When I send a GET request to "/users/<user_id>"', Behave will extract user_id and pass it to your function
+- You receive the ACTUAL VALUES (like "1", "Alice"), not the templates
+- Behave automatically extracts <parameters> from step patterns
+- Your function receives the ACTUAL VALUES from the Examples table
+
+**PARAMETER EXTRACTION EXAMPLES:**
+- Step: 'When I send a GET request to "/users/<user_id>"'
+     ```python
+     # Extract user_id from the path template
+     user_id = path_param.split("<user_id>")[1].split(">")[0]
+     full_url = f"{base_url}/users/{user_id}"
+     ```
+
+4.  **--- HOW TO CREATE THE `lookupKey` (MOST IMPORTANT RULE) ---**
+    *   You **MUST** look at the `expected_outputs` section of the `test_config` provided in your context.
+    *   You **MUST** select the key from that section that best matches the meaning of the current Gherkin step.
+    *   **Example 1:** If the step is `Then the pod status should be "Running"`, you should look in `test_config` and find the key `podStatus`.
+    *   **Example 2:** If the step is `Then the user name should be "Alice"`, you should look in `test_config` and find the key `userName`.
+
+5.  **HOW TO WRITE THE JSON RESULT FILE (for multiple scenarios):**
+    *   You MUST use the following robust "append-only" pattern. This ensures all results are collected.
 
     ```python
     # --- START 'THEN' STEP EXAMPLE PATTERN ---
-    # 1. Create a dynamic lookup key from the Gherkin step.
-    # For a step like "the user's name should be 'Alice'", a good key would be "userName".
-    # For "the pod status should be 'Running'", a good key is "podStatus".
-    lookup_key = "podStatus" # <-- LLM MUST GENERATE THIS DYNAMICALLY
+    def then_the_pod_status_should_be(context, expected_status_from_gherkin):
+        # 1. Find the correct lookup key from the config that matches this step.
+        lookup_key = "podStatus" # <-- YOU MUST DETERMINE THIS KEY BY MATCHING THE STEP TO THE test_config.
 
-    # 2. Retrieve the raw output from the previous step.
-    raw_json_output = context.lastCommandOutput
-    
-    # 3. Parse the output to get the actual value.
-    import json
-    data = json.loads(raw_json_output)
-    actual_value = data['items']['status']['phase'] # Example parsing
-    
-    # 4. Create a dictionary to hold the results.
-    result_data = {
+        # 2. Look up the EXPECTED value from the config.
+        expected_value = context.test_config['expected_outputs'][lookup_key]
+
+        # 3. Get and parse the raw output to find the ACTUAL value.
+        raw_output = context.lastCommandOutput
+        actual_value = raw_output.strip()
+
+        # 4. Create a dictionary for the CURRENT result.
+    current_result = {
         "lookup_key": lookup_key,
+        "expected_value": expected_value,
         "actual_value": actual_value
     }
     
-    # 5. Write the JSON file to the project's root directory.
-    with open('test_result.json', 'w') as f:
-        json.dump(result_data, f)
+    # 5. Read existing results, append new result, and write back as a list
+    import json
+    import os
+    result_file = os.path.join(os.path.dirname(__file__), 'test_result.json')
+    # Read existing results if file exists
+    existing_results = []
+    if os.path.exists(result_file):
+        try:
+            with open(result_file, 'r') as f:
+                existing_results = json.load(f)
+        except json.JSONDecodeError:
+            existing_results = []
+    
+    # Append current result
+    existing_results.append(current_result)
+    
+    # Write back all results as a proper JSON array
+    with open(result_file, 'w', encoding='utf-8') as f:
+        json.dump(existing_results, f, indent=2, ensure_ascii=False)
     # --- END 'THEN' STEP EXAMPLE PATTERN ---
     ```
-4.  **IMPORTS:** List any required imports (like `import json`) at the very top of your response.
-
 ---
 **Current Gherkin Step:** "{{ step_line }}"
 
@@ -452,6 +496,192 @@ You are a Java test automation expert. Your ONLY task is to write the Java code 
 Provide ONLY the raw Java code for the method body now:
 """
 }
+
+
+KNOWLEDGE_BASE_DIR = Path("knowledge_base")
+
+# Global variable for pre-computed vectorstore
+vectorstore_cache = {}
+
+def save_to_knowledge_base(code: str, framework: str, feature_filename: str):
+    """Saves a validated, successful code file to the knowledge base and updates vectorstore."""
+    try:
+        framework_kb_dir = KNOWLEDGE_BASE_DIR / framework
+        framework_kb_dir.mkdir(parents=True, exist_ok=True)
+        
+        # We use a simple naming convention.
+        ext = {"behave": ".py", "godog": ".go", "cucumber": ".java"}.get(framework, ".txt")
+        file_path = framework_kb_dir / f"{Path(feature_filename).stem}{ext}"
+        file_path.write_text(code)
+        print(f"[RAG] Saved successful code to knowledge base: {file_path}")
+        
+        # Invalidate cache so it gets rebuilt with new knowledge
+        if framework in vectorstore_cache:
+            del vectorstore_cache[framework]
+            
+    except Exception as e:
+        print(f"[RAG] ERROR: Could not save to knowledge base. Reason: {e}")
+
+def initialize_rag_system(framework: str):
+    """Pre-compute embeddings during startup for faster retrieval"""
+    start_time = time.time()
+    
+    framework_kb_dir = KNOWLEDGE_BASE_DIR / framework
+    if not framework_kb_dir.exists() or not any(framework_kb_dir.iterdir()):
+        print(f"[RAG] No knowledge base found for {framework}")
+        return None
+
+    try:
+        # 1. Load all existing code files
+        documents = []
+        file_extension = {"behave": ".py", "godog": ".go", "cucumber": ".java"}.get(framework, ".txt")
+        
+        for file_path in framework_kb_dir.glob(f"*{file_extension}"):
+            content = file_path.read_text()
+            documents.append(Document(page_content=content, metadata={"filename": file_path.name}))
+        
+        if not documents:
+            return None
+
+        # 2. Create embeddings
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/paraphrase-MiniLM-L3-v2",  # More compatible
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={
+                'normalize_embeddings': True,
+                'batch_size': 8  # Smaller batch size
+            }
+        )
+        
+        # 3. Use efficient text splitting
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=800,
+            chunk_overlap=50,
+            separators=["\n\n", "\n", " ", ""],
+        )
+        texts = text_splitter.split_documents(documents)
+        
+        # 4. Create vector store with optimization
+        vectorstore = FAISS.from_documents(texts, embeddings)
+        vectorstore.index.nprobe = 5  # Faster search with fewer probes
+        
+        print(f"[RAG] Initialized {framework} vectorstore with {len(texts)} chunks in {time.time() - start_time:.2f}s")
+        return vectorstore
+        
+    except Exception as e:
+        print(f"[RAG] ERROR: Failed to initialize RAG for {framework}: {e}")
+        return None
+
+@lru_cache(maxsize=50)
+def get_relevant_examples_from_kb(query: str, framework: str, k: int = 3) -> str:
+    """
+    Fast, cached version of RAG retrieval with pre-computed embeddings.
+    """
+    start_time = time.time()
+    
+    try:
+        # Initialize vectorstore if not already done
+        if framework not in vectorstore_cache:
+            vectorstore_cache[framework] = initialize_rag_system(framework)
+        
+        vectorstore = vectorstore_cache[framework]
+        if vectorstore is None:
+            return "No knowledge base available."
+
+        # Fast similarity search on pre-computed index
+        similar_docs = vectorstore.similarity_search(query, k=min(k, 5))  # Limit to 5 max
+        
+        # Extract patterns efficiently
+        pattern_examples = []
+        for doc in similar_docs:
+            filename = doc.metadata.get("filename", "unknown")
+            patterns = extract_code_patterns(doc.page_content, query, framework)
+            if patterns:
+                pattern_examples.append(f"# Patterns from: {filename}\n{patterns}")
+        
+        if not pattern_examples:
+            return "No relevant patterns found in knowledge base."
+        
+        # Limit total output size to prevent context overflow
+        examples_text = "\n\n---\n\n".join(pattern_examples[:3])  # Max 3 patterns
+        
+        rag_time = time.time() - start_time
+        print(f"[RAG] Retrieved {len(pattern_examples)} patterns in {rag_time:.3f}s")
+        
+        if rag_time > 1.0:
+            print(f"[RAG] WARNING: Slow retrieval ({rag_time:.3f}s) for framework: {framework}")
+        
+        return f"""**RELEVANT PATTERNS FROM KNOWLEDGE BASE:**
+Use these proven patterns from successful tests:
+
+{examples_text}"""
+
+    except Exception as e:
+        print(f"[RAG] ERROR: Could not retrieve from knowledge base. Reason: {e}")
+        return "Could not retrieve examples from knowledge base."
+
+# Add this function for efficient pattern extraction
+def extract_code_patterns_fast(code: str, query: str, framework: str) -> str:
+    """
+    Fast pattern extraction using regex patterns instead of complex processing.
+    """
+    patterns = []
+    query_lower = query.lower()
+    
+    # Framework-specific pattern extraction
+    if framework == "behave":
+        # Extract function definitions
+        func_patterns = re.findall(r'@(given|when|then)[^\n]+\n\s*def[^{]+\{[^}]+\}', code, re.DOTALL)
+        patterns.extend(func_patterns[:2])  # Max 2 functions
+        
+        # Extract config access patterns
+        if any(word in query_lower for word in ["config", "test_config"]):
+            config_patterns = re.findall(r'context\.test_config\[[^\]]+\]\[[^\]]+\]', code)
+            patterns.extend(config_patterns[:2])
+        
+        # Extract command execution patterns
+        if any(word in query_lower for word in ["command", "run", "execute"]):
+            cmd_patterns = re.findall(r'subprocess\.run\([^)]+\)', code)
+            patterns.extend(cmd_patterns[:2])
+        
+        # Extract JSON result patterns (most important)
+        if any(word in query_lower for word in ["then", "result", "json"]):
+            json_patterns = re.findall(r'test_result\.json.*?json\.dump.*?indent.*?}', code, re.DOTALL)
+            patterns.extend(json_patterns[:1])  # Just one good example
+
+    # Deduplicate and limit patterns
+    unique_patterns = list(set(patterns))[:3]  # Max 3 patterns total
+    
+    return "\n".join(unique_patterns) if unique_patterns else ""
+
+# Replace your existing extract_code_patterns with the faster version
+extract_code_patterns = extract_code_patterns_fast
+
+# Initialize RAG system at startup for faster first response
+def initialize_all_rag_systems():
+    """Pre-warm RAG systems for all frameworks during startup"""
+    print("[RAG] Pre-warming knowledge base systems...")
+    for framework in ["behave", "godog", "cucumber"]:
+        vectorstore_cache[framework] = initialize_rag_system(framework)
+
+def initialize_rag_async(framework):
+    """Initialize RAG in the background"""
+    global rag_initialized
+    try:
+        print(f"[RAG] Background initialization started for {framework}...")
+        vectorstore_cache[framework] = initialize_rag_system(framework)
+        rag_initialized = True
+        print(f"[RAG] Background initialization completed for {framework}")
+    except Exception as e:
+        print(f"[RAG] Background initialization failed: {e}")
+
+def start_rag_initialization(framework):
+    """Start RAG initialization in a background thread"""
+    global rag_initialization_thread
+    rag_initialization_thread = threading.Thread(target=initialize_rag_async, args=(framework,))
+    rag_initialization_thread.daemon = True  # Thread will exit when main exits
+    rag_initialization_thread.start()
+    return rag_initialization_thread
 
 def convert_text_to_bdd_file(input_path: Path, output_format: str):
     """
@@ -847,18 +1077,18 @@ def write_code(framework, feature_content, code, feature_filename, config_path=N
         path.write_text(code)
 
         (behave_features_dir / feature_filename).write_text(feature_content)
-
+ 
         # Corrected file copy logic
         if config_path and user_config_filename:
             destination_config_path = behave_features_dir / user_config_filename
             # Read from source path and write to destination path
             destination_config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
             print(f"Copied config file to: {destination_config_path}")
-
-        # Update environment.py to look for the config file in the correct directory
-        env_py = behave_features_dir / "environment.py"
-        rendered_env_template = env_template.format(user_config_filename=user_config_filename)
-        env_py.write_text(rendered_env_template)
+            env_py = behave_features_dir / "environment.py"
+            rendered_env_template = env_template.format(user_config_filename=user_config_filename)
+            env_py.write_text(rendered_env_template)
+        else:
+            print(f"[WARNING] Cannot create environment.py - user_config_filename is {user_config_filename}")
 
     elif framework == "godog":
         Path("godog").mkdir(parents=True, exist_ok=True)
@@ -896,14 +1126,33 @@ def write_code(framework, feature_content, code, feature_filename, config_path=N
 
 def validate_code(code, framework, config_path=None, user_config_filename=None, feature_file_path=None):
     """
-    Validates generated code by separating compilation/runtime crashes from logical test failures.
-
-    Returns a tuple (is_runnable: bool, message: str):
-    - is_runnable (True): The code is valid and runnable. The agent's job is done.
-      The message will indicate if tests passed or failed logically.
-    - is_runnable (False): The code is flawed (syntax, compilation, or crash). The agent must fix it.
-      The message will contain the specific error.
+    Validates generated code and returns INTELLIGENTLY SUMMARIZED error messages 
+    to conserve LLM context space while preserving critical information.
     """
+    
+    def summarize_traceback(full_error: str, filename: str = "step_definitions.py") -> str:
+        """
+        Parses a long traceback and extracts only the most relevant lines for the agent:
+        - The final exception message.
+        - All lines that refer specifically to the code we generated.
+        """
+        lines = full_error.split('\n')
+        
+        # Always include the last few lines, which contain the actual exception type and message.
+        # This is the most important part.
+        exception_summary = [line for line in lines[-5:] if line.strip()]
+
+        # Find all lines in the traceback that point to our generated file.
+        relevant_lines = [line for line in lines if f'File "{filename}"' in line or f'File "features\\steps\\{filename}"' in line]
+        
+        if not relevant_lines and not exception_summary:
+            # If parsing fails, return a simple truncation as a fallback.
+            return '\n'.join(lines[:10] + ['...'] + lines[-10:])
+        
+        # Combine the relevant parts into a concise summary for the agent.
+        summary = "Traceback Summary (most relevant parts):\n" + "\n".join(relevant_lines) + "\n...\n" + "\n".join(exception_summary)
+        return summary
+    
     try:
         # --------------------------------------------------------------------
         # BEHAVE (PYTHON) VALIDATION
@@ -947,10 +1196,10 @@ def validate_code(code, framework, config_path=None, user_config_filename=None, 
                 # If it failed, check if it was a logical assertion failure or a code crash
                 if "AssertionError" in full_output:
                     # A test failed logically. This is a success for the agent.
-                    return True, f"VALIDATION_SUCCESS: Code ran, but a test assertion failed as expected.\n{full_output}"
+                    return True, f"VALIDATION_SUCCESS: Code ran, but a test assertion failed."
                 else:
                     # Any other error is a code crash (e.g., NameError, TypeError). The agent must fix this.
-                    return False, f"RUNTIME_CRASH_FAILED: Behave test execution crashed.\n{full_output}"
+                    return False, f"RUNTIME_CRASH_FAILED: {summarize_traceback(full_output)}"
 
         # --------------------------------------------------------------------
         # GODOG (GO) VALIDATION
@@ -976,10 +1225,10 @@ def validate_code(code, framework, config_path=None, user_config_filename=None, 
                 
                 if "--- FAIL:" in full_output:
                     # A logical test failure. This is a success for the agent.
-                    return True, f"VALIDATION_SUCCESS: Code ran, but a test failed as expected.\n{full_output}"
+                    return True, f"VALIDATION_SUCCESS: Code ran, but a test failed."
                 else:
                     # A panic or other crash. The agent must fix this.
-                    return False, f"RUNTIME_CRASH_FAILED: Go test execution crashed.\n{full_output}"
+                    return False, f"RUNTIME_CRASH_FAILED: {summarize_traceback(full_output)}"
             finally:
                 os.remove(temp_file_path)
 
@@ -1038,11 +1287,11 @@ def validate_code(code, framework, config_path=None, user_config_filename=None, 
                 # but an agent should fix that. A "Failure" is an assertion error. We will treat both as
                 # runnable for simplicity, but a more advanced agent could distinguish them.
                 if "Failures:" in full_output or "Errors:" in full_output:
-                    return True, f"VALIDATION_SUCCESS: Code compiled and tests ran. Some tests may have failed as expected.\n{full_output}"
+                    return True, f"VALIDATION_SUCCESS: Code compiled and tests ran. Some tests may have failed."
                 else:
                     # The build failed for a reason other than a test failure (e.g., plugin error, crash).
                     # This is a code issue the agent must fix.
-                    return False, f"RUNTIME_CRASH_FAILED: Maven test execution failed without reporting test results.\n{full_output}"
+                    return False, f"RUNTIME_CRASH_FAILED:{summarize_traceback(full_output)}"
 
         else:
             return False, f"Unsupported framework: {framework}"
@@ -1124,6 +1373,8 @@ def clean_agent_output(agent_output: str) -> str:
     It handles markdown fences for any language and the "Final Answer:" prefix.
     """
     # First, check if "Final Answer:" is in the output and split by it
+    print("Raw generated code:")
+    print(repr(agent_output[:200])) 
     if "Final Answer:" in agent_output:
         agent_output = agent_output.split("Final Answer:")[-1].strip()
 
@@ -1161,6 +1412,9 @@ def main():
         print("Unsupported framework. Please choose 'behave', 'godog', or 'cucumber'.")
         return
 
+    print("[RAG] Starting background initialization...")
+    rag_thread = start_rag_initialization(framework)
+
     # Step 3: Determine BDD file format (fixed to gherkin if code generation)
     # If the user provides a plain text file, we convert it to gherkin.
     # If they provide a .feature file, we still pass it through LLM for organization,
@@ -1172,6 +1426,7 @@ def main():
     output_file_path, feature_content = convert_text_to_bdd_file(input_text_path, bdd_output_format)
     if not output_file_path or not Path(output_file_path).exists():
         print("Failed to generate/organize BDD feature file with LLM. Exiting.")
+        rag_thread.join()  # Clean up thread
         return
 
     feature_file_path = Path(output_file_path)
@@ -1184,7 +1439,9 @@ def main():
     # Step 5: Load Test Configuration (from project root or nearest parent)
     test_config = load_test_config(filename=user_config_filename, start_path=config_path.parent)
 
-    global framework_for_agent, config_path_for_agent, user_config_filename_for_agent, feature_file_path_for_agent
+    global framework_for_agent, config_path_for_agent, user_config_filename_for_agent, feature_file_path_for_agent, rag_initialized, rag_initialization_thread
+    rag_initialized = False
+    rag_initialization_thread = None
     framework_for_agent = framework
     config_path_for_agent = config_path
     user_config_filename_for_agent = user_config_filename
@@ -1227,12 +1484,24 @@ def main():
                 godog_fields_from_llm = re.findall(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*\s+[a-zA-Z_][a-zA-Z0-9_]*)\s*$', step_data["logic"], re.MULTILINE)
                 for field_decl in godog_fields_from_llm:
                     all_godog_fields.add(field_decl)
+        
+    # WAIT FOR RAG TO FINISH IF NOT DONE YET
+    if rag_thread.is_alive():
+        print("[RAG] Waiting for background initialization to complete...")
+        rag_thread.join(timeout=10)  # Wait max 10 seconds
+        if rag_thread.is_alive():
+            print("[RAG] Initialization taking too long, proceeding without cache...")
+        else:
+            print("[RAG] Background initialization completed successfully!")
 
 
     # Step 7: Generate and Validate Code with an Agent
-    
     print("\n--- Invoking LangChain Agent to Generate and Validate Code ---")
     
+    # --- NEW RAG STEP: Retrieve relevant examples ---
+    print("[RAG] Searching knowledge base for relevant examples...")
+    relevant_examples = get_relevant_examples_from_kb(query=feature_content, framework=framework)
+        
     # Generate the initial "flawed" code first, outside the agent
     initial_code_to_correct = generate_framework_code(
         all_step_metadata=all_step_metadata,
@@ -1244,52 +1513,39 @@ def main():
 
     # The agent's input describes its goal and gives it the context it needs.
     agent_prompt_template = Template("""
-My one and only goal is to write a complete, syntactically correct, and runnable BDD test file for the "{{ framework }}" framework.
+GOAL: Fix this BDD test code to be complete, syntactically correct, and runnable.
 
-The final code MUST be a single block of code that can be saved directly to a file.
-The code must follow the "extract, don't assert" pattern for 'Then' steps, writing a `test_result.json` file.
+FRAMEWORK: {{framework}}
 
----
-**FRAMEWORK-SPECIFIC INSTRUCTIONS FOR "{{ framework }}":**
+CRITICAL REQUIREMENTS:
+1. Use "extract, don't assert" pattern for Then steps
+2. Write results to test_result.json file  
+3. Final code must be a single saveable block
+4. Follow framework-specific patterns from knowledge base
 
-{% if framework == 'behave' %}
-**IMPORTANT for Behave:** The test configuration from `{{ user_config_filename }}` is automatically loaded into the `context.test_config` object. You MUST access config values from there.
-- **CORRECT:** `command = context.test_config['commands']['some_command']`
-- **INCORRECT:** `with open('config.yaml', 'r') as f:` <-- DO NOT DO THIS.
-{% elif framework == 'cucumber' %}
-**IMPORTANT for Cucumber:** The test configuration from `{{ user_config_filename }}` is automatically loaded into the static `testConfig` JsonNode. You MUST access config values using the `.at()` method.
-- **CORRECT:** `String cmd = testConfig.at("/commands/get_pod_json_by_label").asText();`
-- **INCORRECT:** `testConfig.get("...")` <-- DO NOT DO THIS.
-{% elif framework == 'godog' %}
-**IMPORTANT for Godog:** You will need to write the logic to load and parse the `config.yaml` file yourself. Store the parsed config in a field on the `scenarioContext` struct.
-- **EXAMPLE:** `s.config = loadConfig("config.yaml")`
-{% endif %}
----
+**RELEVANT PATTERNS FROM SUCCESSFUL TESTS:**
+{{ relevant_examples }}
 
-Here is all the information you need:
+**INPUT DATA:**
 
-1. GHERKIN FEATURE FILE:
----
+FEATURE:
 {{ feature_content }}
----
 
-2. CONFIGURATION FILE (`{{ user_config_filename }}`):
----
+CONFIG:
 {{ test_config_json }}
----
 
-3. INITIAL DRAFT of the step definition code that I must fix:
----
+CODE TO FIX:
 {{ initial_code_to_correct }}
----
 
-My process is as follows:
-1.  Write the complete, corrected code based on all instructions.
-2.  Use the `validate_generated_test_code` tool to check the code.
-3.  If the tool reports `VALIDATION_FAILED`, I will revise my code and try again.
-4.  If the tool reports `VALIDATION_SUCCESS`, my job is done.
+**PROCESS:**
+1. Analyze the code and identify issues
+2. Apply proven patterns from knowledge base
+3. Validate with tool
+4. If validation fails, fix errors and retry  
+5. If validation succeeds, output final code
 
-My final answer must be ONLY the complete, corrected code that was successfully validated.
+**OUTPUT:**
+ONLY the complete corrected code that passes validation - no explanations.
 """)
 
     agent_input = agent_prompt_template.render(
@@ -1297,7 +1553,8 @@ My final answer must be ONLY the complete, corrected code that was successfully 
         user_config_filename=user_config_filename,
         feature_content=feature_content,
         test_config_json=json.dumps(test_config, indent=2),
-        initial_code_to_correct=initial_code_to_correct
+        initial_code_to_correct=initial_code_to_correct,
+        relevant_examples=relevant_examples
     )
 
     # Invoke the agent executor
@@ -1308,7 +1565,6 @@ My final answer must be ONLY the complete, corrected code that was successfully 
     # Get the raw output from the agent
     agent_raw_output = result['output']
 
-    # --- THIS IS THE CRITICAL FIX ---
     # Use the universal cleaning function to extract the pure code.
     final_generated_code = clean_agent_output(agent_raw_output)
     
@@ -1319,7 +1575,7 @@ My final answer must be ONLY the complete, corrected code that was successfully 
         print("\n!!! LangChain Agent FAILED to produce runnable code. This is an agent failure. !!!")
         print("Final error from validation tool:\n" + validation_message)
         # Write the flawed code so user can inspect
-        write_code(framework, feature_content, final_generated_code, feature_filename)
+        write_code(framework, feature_content, final_generated_code, feature_filename, config_path, user_config_filename)
         print(f"Generated code (with errors) saved for inspection.")
         return # Exit
     
@@ -1329,13 +1585,17 @@ My final answer must be ONLY the complete, corrected code that was successfully 
     print("Writing generated code to project structure...")
     write_code(framework, feature_content, final_generated_code, feature_filename, config_path, user_config_filename)
 
+    # Save the successful code to the knowledge base
+    save_to_knowledge_base(final_generated_code, framework, feature_filename)
+
     # Step 9: Execute Data Extraction Run for the Target Framework
     print(f"\n--- EXECUTING DATA EXTRACTION RUN FOR {framework.upper()} ---")
 
     # Define project paths and the result file that the generated code will create
     project_dir = Path(framework)
-    result_file_path = project_dir / "test_result.json"
-    if framework == "cucumber":
+    if framework == "behave" or framework == "godog":
+        result_file_path = project_dir / "test_result.json"
+    elif framework == "cucumber":
         result_file_path = project_dir / "target" / "test_result.json"
     
     # Clean previous results before running
@@ -1349,15 +1609,18 @@ My final answer must be ONLY the complete, corrected code that was successfully 
         execution_result = subprocess.run(
             ["behave"], cwd=project_dir, capture_output=True, text=True
         )
+        time.sleep(1)
     elif framework == "godog":
         execution_result = subprocess.run(
             ["go", "test", "./..."], cwd=project_dir, capture_output=True, text=True
         )
+        time.sleep(1)
     elif framework == "cucumber":
         mvn_cmd = r"C:\Program Files\apache-maven-3.9.10\bin\mvn.cmd" # Ensure this path is correct
         execution_result = subprocess.run(
             [mvn_cmd, "clean", "test"], cwd=project_dir, capture_output=True, text=True, shell=False
         )
+        time.sleep(1) 
     
     # --- Check for crashes during the extraction run ---
     # Note: A non-zero exit code from a test runner can mean a crash OR a failed assertion.
@@ -1375,36 +1638,72 @@ My final answer must be ONLY the complete, corrected code that was successfully 
 
     # Step 10: Perform Dynamic Assertion in Python (The Final Verdict)
     print("\n--- PERFORMING DYNAMIC ASSERTION IN PYTHON ---")
+    
+    # The Behave test runs with its working directory set to `project_dir`.
+    project_dir = Path(framework) # e.g., Path('behave')
+    if framework == "behave" or framework == "godog":
+        result_file_path = project_dir / "test_result.json"
+    elif framework == "cucumber":
+        result_file_path = project_dir / "target" / "test_result.json"
+
     try:
         if not result_file_path.exists():
-             raise FileNotFoundError(f"The result file '{result_file_path}' was not created. The '@Then' step likely failed or was not executed.")
+             # This is now a more informative error message.
+             print(f"\n[X] CRITICAL ERROR: The result file was not found at the expected location: {result_file_path}")
+             print("This may indicate a crash during the test run or an issue with the generated code's file path.")
+             return
+
+        # Read the entire JSON file as a single JSON array
+        with open(result_file_path, 'r', encoding='utf-8') as f:
+            all_results = json.load(f)  # This reads the entire JSON array
         
-        with open(result_file_path, 'r') as f:
-            result_data = json.load(f)
+        if not all_results:
+            print("\n[WARNING] Test run produced an empty result list.")
+            print("\n[SUCCESS] FINAL TEST STATUS: PASSED (No assertions were logged).")
+            return
+
+        print(f"\nFound {len(all_results)} assertions to check in the report.")
         
-        lookup_key = result_data.get("lookup_key")
-        actual_value = result_data.get("actual_value")
+        final_status_list = []
+        overall_status = "PASSED"
 
-        if lookup_key is None or actual_value is None:
-            raise ValueError("Result JSON is malformed. It must contain 'lookup_key' and 'actual_value'.")
+        for i, result_data in enumerate(all_results, 1):
+            lookup_key = result_data.get("lookup_key") or result_data.get("lookupKey")
+            actual_value_raw = result_data.get("actual_value") or result_data.get("actualValue")
+            expected_value_raw = result_data.get("expected_value") or result_data.get("expectedValue")
+            
+            if lookup_key is None or actual_value_raw is None or expected_value_raw is None:
+                print(f"\n--- Assertion #{i} ---")
+                print("  - STATUS: SKIPPED (Malformed data in log entry)")
+                continue
 
-        expected_value = test_config.get("expected_outputs", {}).get(lookup_key)
+            quote_chars_to_strip = "\"' "
+            actual_value_clean = str(actual_value_raw).strip(quote_chars_to_strip)
+            expected_value_clean = str(expected_value_raw).strip(quote_chars_to_strip)
+            
+            pass_fail_status = "FAILED"
+            if actual_value_clean == expected_value_clean:
+                pass_fail_status = "PASSED"
+            else:
+                overall_status = "FAILED"
 
-        if expected_value is None:
-            raise KeyError(f"The lookup key '{lookup_key}' from test_result.json was not found in the 'expected_outputs' section of your config file.")
+            result_data['status'] = pass_fail_status
+            final_status_list.append(result_data)
+            
+            print(f"\n--- Assertion #{i} for Key: '{lookup_key}' ---")
+            print(f"  - Actual Value:    '{actual_value_clean}'")
+            print(f"  - Expected Value:  '{expected_value_clean}'")
+            print(f"  - STATUS:          {pass_fail_status}")
 
-        print(f"  - Assertion Key:   '{lookup_key}'")
-        print(f"  - Actual Value:    '{actual_value}'")
-        print(f"  - Expected Value:  '{expected_value}'")
-        
-        # Perform the final comparison
-        if str(actual_value) == str(expected_value):
-            print("\n[SUCCESS] FINAL TEST STATUS: PASSED")
-        else:
-            print(f"\n[FAILURE] FINAL TEST STATUS: FAILED. Expected '{expected_value}' but got '{actual_value}'.")
+        with open(result_file_path, 'w') as f:
+            json.dump(final_status_list, f, indent=4)
+
+        print(f"\nEnriched report with all statuses saved to '{result_file_path}'")
+
+        print(f"\n[{overall_status}] FINAL OVERALL TEST STATUS: {overall_status}")
 
     except Exception as e:
         print(f"\n[X] CRITICAL ERROR: Could not perform final assertion in Python. Reason: {e}")
-
+        
 if __name__ == '__main__':
     main()
