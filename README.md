@@ -1,4 +1,4 @@
-# Automate Test Framework
+# Autonomous Test Framework
 
 ## Project Overview
 
@@ -222,3 +222,4 @@ This project is suitable for:
 * Automation testing research
 * BDD framework comparison studies
 * Enterprise test automation prototyping
+
