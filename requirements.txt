@@ -1,0 +1,12 @@
+#Install the necessary packages for working with this project
+langchain
+langchain-openai
+langchain-core
+langchain-community
+langchain-huggingface
+faiss-cpu
+huggingface-hub
+python-dotenv
+jinja2
+pyyaml
+openai
