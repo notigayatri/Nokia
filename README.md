@@ -1,131 +1,139 @@
-Automate Test Framework
-Project Overview
+# Automate Test Framework
+
+## Project Overview
 
 This project is a framework-agnostic Behavior Driven Development (BDD) test automation generator.
-It accepts Gherkin-based feature files and automatically generates executable test code for multiple BDD frameworks while maintaining a unified execution and output strategy.
+It accepts Gherkin-based feature files and automatically generates executable test code for multiple
+BDD frameworks while maintaining a unified execution and output strategy.
 
-The framework avoids dependency on framework-specific assertion mechanisms or report formats.
-Instead, it extracts runtime results inside Then steps and stores them in a custom, user-defined output structure, enabling agent-based validation, retries, and cross-framework consistency.
+The framework avoids framework-specific assertion mechanisms and report formats.
+Instead, runtime results are extracted inside Then steps and stored in a custom,
+user-defined output structure to support agent-based validation and retries.
 
-Supported Frameworks
-Framework	Language	Support Status
-Behave	Python	Supported
-Godog	Go	Supported
-Cucumber	Java	Supported
-Objectives
+## Supported Frameworks
 
-Automatically generate step definitions from Gherkin scenarios
+* Behave (Python)
+* Godog (Go)
+* Cucumber (Java)
 
-Support multiple BDD frameworks using a single input format
+## Objectives
 
-Avoid framework-dependent reporting mechanisms
+* Automatically generate step definitions from Gherkin scenarios
+* Support multiple BDD frameworks using a single input format
+* Avoid framework-dependent reporting mechanisms
+* Enable custom output parsing in Then steps
+* Facilitate agent-driven code validation and correction
+* Ensure portability across environments and frameworks
 
-Enable custom output parsing in Then steps
+## Project Structure
 
-Facilitate agent-driven code validation and correction
-
-Ensure portability across environments and frameworks
-
-Project Structure
+```
 project-root/
-│
 ├── automation_script.py
-│
 ├── input_files/
 │   └── (user-provided feature files)
-│
-├── config.yaml                # User-provided configuration
-│
+├── config.yaml
 ├── knowledge_base/
 │   ├── behave/
 │   ├── godog/
 │   └── cucumber/
-│
 ├── requirements.txt
 └── README.md
-
+```
 
 Framework-specific directories are created automatically when the script is executed.
 
-System Requirements
-General Requirements
+## System Requirements
 
-Operating System: Windows, Linux, or macOS
+### General Requirements
 
-Python version: 3.9 or higher
+* Operating System: Windows, Linux, or macOS
+* Python 3.9 or higher
 
-Framework-Specific Requirements
-Behave
+### Framework-Specific Requirements
 
-Python
+#### Behave
 
-behave library
+* Python
+* behave library
 
-Godog
+#### Godog
 
-Go version 1.20 or higher
+* Go 1.20 or higher
+* godog package
 
-godog package
+#### Cucumber
 
-Cucumber
+* Java 11 or higher
+* Maven or Gradle
+* Cucumber dependencies
 
-Java version 11 or higher
+## Installation and Setup
 
-Maven or Gradle
+### Clone the Repository
 
-Cucumber dependencies
-
-Installation and Setup
-Clone the Repository
+```
 git clone <repository-url>
 cd project-root
+```
 
-Install Python Dependencies
+### Install Python Dependencies
+
+```
 pip install -r requirements.txt
+```
 
-Install Framework Dependencies
-Behave
+### Install Framework Dependencies
+
+#### Behave
+
+```
 pip install behave
+```
 
-Godog
+#### Godog
+
+```
 go install github.com/cucumber/godog/cmd/godog@latest
+```
 
-Cucumber
+#### Cucumber
 
 Add the following dependencies using Maven or Gradle:
 
-cucumber-java
+* cucumber-java
+* cucumber-junit
 
-cucumber-junit
+## Input Specifications
 
-Input Specifications
-Feature File
+### Feature File
 
 The input feature file must follow standard Gherkin syntax.
 
-Example
+Example:
+
+```
 Feature: Pod health check
 
 Scenario: Check if the pod is in Running state
   Given the mini Kube cluster is accessible
   When I check the status of the pod with label "app=flask-api"
   Then the pod status should be "Running"
+```
 
-Environment Configuration File
+### Configuration File
 
-The project requires a user-provided config.yaml file.
+A user-provided YAML configuration file is required.
 
-The configuration file must contain three sections:
+The configuration file must contain:
 
-environment – environment details
+* environment details
+* command templates
+* expected outputs
 
-commands – executable command templates
+### Required Structure
 
-expected_outputs – expected results for validation
-
-Required Structure
-# config.yaml
-
+```
 environment:
   default_namespace: "default"
 
@@ -137,101 +145,80 @@ commands:
 expected_outputs:
   minikubeStatus: "minikube\ntype: Control Plane\nhost: Running\nkubelet: Running\napiserver: Running\nkubeconfig: Configured"
   podStatusRunning: "Running"
+```
 
-Notes
+Notes:
 
-environment contains static environment values
+* environment contains static values
+* commands contain templates with placeholders
+* expected_outputs contain expected values for validation
+* placeholders must match step parameters
 
-commands contains command templates with placeholders
-
-expected_outputs contains expected results used during validation
-
-Placeholders in commands must match step parameters
-
-Execution Instructions
+## Execution Instructions
 
 Run the main script:
 
+```
 python automation_script.py
-
+```
 
 You will be prompted for:
 
-Path to the input feature file
+* Input feature file path
+* Configuration file path
+* Target framework (behave, godog, cucumber)
 
-Path to the environment configuration file
+## Execution Flow
 
-Target framework (behave, godog, or cucumber)
+1. Input file is validated or converted to Gherkin
+2. Step definitions are generated
+3. Framework-specific code is assembled
+4. Tests are executed
+5. Runtime values are extracted in Then steps
+6. Results are written to a custom output file
 
-Execution Flow
+## Output Specification
 
-Input file is validated and converted to Gherkin if required
+Framework-generated reports are not used.
 
-Step definitions are generated dynamically
+Results are written to a custom JSON file.
 
-Framework-specific code is assembled using templates
+Example:
 
-Tests are executed using the selected framework
-
-Runtime outputs are parsed inside Then steps
-
-Results are written to a custom output file
-
-Output Specification
-Custom Output File
-
-The project does not rely on framework-generated reports.
-Execution results are written to a custom JSON file.
-
-Example Output
+```
 {
   "lookup_key": "podStatus",
   "expected": "Running",
   "actual": "Running",
   "status": "PASS"
 }
+```
 
-Output Design Principles
+Design principles:
 
-Then steps must not throw assertion errors
+* Then steps do not assert
+* Then steps only extract and record values
+* Validation occurs outside test execution
 
-Then steps only extract and record results
+## Agent-Based Validation
 
-Validation and decision-making occur outside the test execution layer
+An agent validates generated code by:
 
-Agent-Based Validation
+* Detecting compilation and runtime errors
+* Regenerating or correcting step logic
+* Stopping execution once validation succeeds
 
-The system supports an agent-driven execution model.
+## Future Enhancements
 
-The agent can:
+* Integration with external reporting tools (Allure, dashboards)
+* Web-based visualization of custom output results
+* Support for additional BDD frameworks like Gauge
 
-Validate generated code
-
-Detect compilation and runtime errors
-
-Regenerate or correct step logic
-
-Terminate execution once validation succeeds
-
-This approach minimizes manual intervention and improves reliability.
-
-
-Future Enhancements
-
-Integration with external reporting tools
-
-Web-based result visualization
-
-Support for additional BDD frameworks like Gauge
-
-Intended Use
+## Intended Use
 
 This project is suitable for:
 
-Academic submissions
-
-Automation testing research
-
-BDD framework comparison studies
-
-Enterprise test automation prototyping
+* Academic submissions
+* Automation testing research
+* BDD framework comparison studies
+* Enterprise test automation prototyping
