@@ -1,0 +1,20 @@
+# config.yaml
+# Configuration for the Kubernetes Pod BDD tests
+
+# Environment details: Used in 'Given' steps.
+environment:
+  default_namespace: "default"  # Default Kubernetes namespace
+
+# Command Templates: Used in 'When' steps.
+# Each key corresponds to a step in the feature file.
+commands:
+  get_minikube_status: "minikube status"
+  get_pod_json_by_label: "kubectl get pod -l {label} -o json -n {namespace}"
+  get_pod_stats: "kubectl get pod -l {label} -o jsonpath='{{.items[0].status.phase}}' -n {namespace}"
+
+# Expected Outputs: Used in 'Then' steps.
+# Keep assertions modular so each scenario can pick relevant ones.
+expected_outputs:
+  minikubeStatus: "minikube\ntype: Control Plane\nhost: Running\nkubelet: Running\napiserver: Running\nkubeconfig: Configured"
+
+  podStatusRunning: "Running"
