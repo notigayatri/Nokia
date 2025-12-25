@@ -1,5 +1,0 @@
-GENERIC:
-  - key: environment
-    description: What is the environment for this test? (e.g., dev, staging, prod, minikube, etc.)
-    type: string
-    example: dev

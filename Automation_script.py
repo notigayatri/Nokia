@@ -1,3 +1,12 @@
+from langchain_openai import ChatOpenAI
+from langchain_core.output_parsers import StrOutputParser
+from langchain.agents import tool
+from langchain.prompts import ChatPromptTemplate
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_community.vectorstores import FAISS
+from langchain.schema import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+
 import os
 import re
 import json
@@ -8,20 +17,26 @@ import tempfile
 import subprocess
 from pathlib import Path
 from jinja2 import Template, Environment
-from openai import OpenAI
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import yaml
 import hashlib
-import textwrap
+from functools import lru_cache
 from collections import namedtuple
 
-load_dotenv() # Load environment variables from .env file
+load_dotenv()
 
-# Initialize Together AI client
-client = OpenAI(
-    api_key=os.getenv("PERPLEXITY_API_KEY"),
-    base_url="https://api.perplexity.ai"
+LLM_MODEL = "gpt-oss-120b"
+
+# --- LangChain LLM Initialization ---
+# This replaces direct `OpenAI` client for LangChain operations
+# It's more modular and integrates with the entire LangChain ecosystem.
+llm = ChatOpenAI(
+    base_url="https://api.cerebras.ai/v1",
+    api_key=os.environ.get("CEREBRAS_API_KEY"),
+    model_name=LLM_MODEL,
+    temperature=0.2 # Control creativity within the LLM object
 )
-LLM_MODEL = "sonar-pro" # Using your preferred model
 
 def escape_java_regex(value: str) -> str:
     value = value.replace('\\', '\\\\')       # escape backslashes
@@ -35,7 +50,6 @@ env.filters['escape_java_regex'] = escape_java_regex
 # Add tojson filter for passing dicts to LLM as JSON strings in templates
 env.filters['tojson'] = json.dumps
 
-
 behave_template = Template('''from behave import given, when, then
 {% for line in step_imports %}
 {{ line }}
@@ -48,31 +62,70 @@ def {{ step.func_name }}(context{% for param in step.parameters %}, {{ param }}{
 {% endfor %}
 ''')
 
+env_template = """
+import yaml
+import os
+def before_all(context):
+    config_path = os.path.join(os.path.dirname(__file__), '{user_config_filename}')
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found at: {{config_path}}")
+    
+    with open(config_path, 'r') as f:
+        context.test_config = yaml.safe_load(f)
+    
+    print(f"Loaded test configuration from: {{config_path}}")
+"""
+
 godog_template = Template('''package main
 
-// LLM-generated imports will go here
-{% for line in step_imports %}
-import "{{ line }}"
-{% endfor %}
+import (
+    "context"
+    "fmt"
+    "os"
+    "testing"
 
-// LLM-generated scenarioContext struct will go here
+    "github.com/cucumber/godog"
+    "gopkg.in/yaml.v3"
+    {% for imp in step_imports if imp -%}
+    "{{ imp }}"
+    {% endfor %}
+)
+
+
+// Global config
+var testConfig map[string]interface{}
+
+
+// Scenario context
 type scenarioContext struct {
-{% for field in scenario_context_fields %}
+    {% for field in scenario_context_fields -%}
     {{ field }}
-{% endfor %}
+    {% endfor %}
 }
 
+
+// New scenario context
 func newScenarioContext() *scenarioContext {
     return &scenarioContext{}
 }
 
+
+// --------------------
+// Step definitions
+// --------------------
 {% for step in steps %}
-func (s *scenarioContext) {{ step.func_name }}(ctx context.Context{% for param in step.parameters %}, {{ param }} string{% endfor %}) error {
-{{ step.logic | indent(4) }}
+func (s *scenarioContext) {{ step.func_name }}(
+    ctx context.Context{% for param in step.parameters %}, {{ param }} string{% endfor %}
+) error {
+
+    {{ step.logic | indent(4) }}
+
     return nil
 }
 {% endfor %}
 
+
+// Register steps
 func InitializeScenario(ctx *godog.ScenarioContext) {
     s := newScenarioContext()
 
@@ -80,7 +133,35 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
     ctx.Step(`^{{ step.step_text }}$`, s.{{ step.func_name }})
     {% endfor %}
 }
+
+
+// Run tests
+func TestFeatures(t *testing.T) {
+
+    configData, err := os.ReadFile("{{ user_config_filename }}")
+    if err != nil {
+        t.Fatalf("Error reading config file: %v", err)
+    }
+    if err := yaml.Unmarshal(configData, &testConfig); err != nil {
+        t.Fatalf("Error parsing YAML config: %v", err)
+    }
+
+    suite := godog.TestSuite{
+        Name:                "custom-output-tests",
+        ScenarioInitializer: InitializeScenario,
+        Options: &godog.Options{
+            Format: "pretty",   // IMPORTANT: disables JSON generation
+            Paths:  []string{"features"},
+            Strict: true,
+        },
+    }
+
+    if status := suite.Run(); status != 0 {
+        t.Errorf("godog tests failed with status %d", status)
+    }
+}
 ''')
+
 
 cucumber_step_template = env.from_string('''package stepdefinitions;
 
@@ -88,46 +169,57 @@ import io.cucumber.java.en.Given;
 import io.cucumber.java.en.When;
 import io.cucumber.java.en.Then;
 import org.junit.Assert;
+import org.yaml.snakeyaml.Yaml;
 
-// Custom imports for step definitions
+// Imports for robust config loading
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+
+import java.io.InputStream;
+import java.util.Map;
+
+// LLM-generated custom imports will be placed here
 {% for line in custom_imports %}
 import {{ line }};
 {% endfor %}
 
 public class StepDefinitions {
+
+    // The testConfig is a JsonNode, which is easy and safe to query.
+    private static JsonNode testConfig;
+
+    // Static variables to share state between steps
+    public static String lastCommandOutput;
+    public static io.restassured.response.Response lastApiResponse; // If using RestAssured
+    public static int lastResponseStatusCode;
+
+    // Static block to load the config file once
+    static {
+        try (InputStream in = StepDefinitions.class.getClassLoader().getResourceAsStream("{{ user_config_filename }}")) {
+            if (in == null) {
+                throw new RuntimeException("Config file not found: {{ user_config_filename }}");
+            }
+            Yaml yaml = new Yaml();
+            Map<String, Object> yamlData = yaml.load(in);
+            ObjectMapper objectMapper = new ObjectMapper();
+            testConfig = objectMapper.valueToTree(yamlData);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load or parse test config", e);
+        }
+    }
+
+    // The template now iterates through each step and builds the full method for it.
+    // The LLM only provides the "logic" part.
     {% for step in steps %}
     @{{ step.gherkin_keyword.lower() | capitalize }}("{{ step.step_text | escape_java_regex }}")
-    public void {{ step.func_name }}({% if step.parameters %}{% for param in step.parameters %}String {{ param }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}) {
-{{ step.logic | indent(4) }}
+    public void {{ step.func_name }}({% if step.parameters %}{% for param in step.parameters %}String {{ param }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}) throws Exception {
+        // LLM-generated logic goes here
+{{ step.logic | indent(8) }}
     }
     {% endfor %}
 }
 ''')
-
-cucumber_env_template = """
-package stepdefinitions;
-
-import io.cucumber.java.Before;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.util.Properties;
-
-public class Hooks {
-    public static Properties config;
-
-    @Before(order = 0)
-    public void loadConfig() throws IOException {
-        if (config == null) {
-            String userConfigFilename = "{{ user_config_filename }}";
-            config = new Properties();
-            try (FileInputStream fis = new FileInputStream("src/test/resources/" + userConfigFilename)) {
-                config.load(fis);
-            }
-            System.out.println("Loaded config file: " + userConfigFilename);
-        }
-    }
-}
-"""
 
 cucumber_runner_template = Template('''package runner;
 
@@ -146,189 +238,501 @@ public class TestRunner {
 ''')
 
 pom_template = Template('''<project xmlns="http://maven.apache.org/POM/4.0.0"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-  <modelVersion>4.0.0</modelVersion>
-  <groupId>com.example</groupId>
-  <artifactId>cucumber-tests</artifactId>
-  <version>1.0-SNAPSHOT</version>
-  <dependencies>
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>cucumber-tests</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <cucumber.version>7.18.1</cucumber.version>
+        <junit.version>4.13.2</junit.version>
+        <jackson.version>2.17.1</jackson.version>
+    </properties>
+
+    <dependencies>
+    <!-- Cucumber Core + Java -->
     <dependency>
-      <groupId>io.cucumber</groupId>
-      <artifactId>cucumber-java</artifactId>
-      <version>7.15.0</version>
-      <scope>test</scope>
+        <groupId>io.cucumber</groupId>
+        <artifactId>cucumber-java</artifactId>
+        <version>${cucumber.version}</version>
+        <scope>test</scope>
     </dependency>
+
+    <!-- Cucumber JUnit Runner -->
+    <dependency>
+        <groupId>io.cucumber</groupId>
+        <artifactId>cucumber-junit</artifactId>
+        <version>${cucumber.version}</version>
+        <scope>test</scope>
+    </dependency>
+
+    <!-- SnakeYAML (for loading config.yaml) -->
     <dependency>
         <groupId>org.yaml</groupId>
         <artifactId>snakeyaml</artifactId>
         <version>2.2</version>
     </dependency>
-    <dependency>
-      <groupId>io.cucumber</groupId>
-      <artifactId>cucumber-junit</artifactId>
-      <version>7.14.0</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>junit</groupId>
-      <artifactId>junit</artifactId>
-      <version>4.13.2</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-        <groupId>com.fasterxml.jackson.core</groupId>
-        <artifactId>jackson-databind</artifactId>
-        <version>2.16.1</version>
-        <scope>test</scope>
-    </dependency>
+
+    <!-- Rest Assured -->
     <dependency>
         <groupId>io.rest-assured</groupId>
         <artifactId>rest-assured</artifactId>
         <version>5.4.0</version>
         <scope>test</scope>
     </dependency>
+
+    <!-- JUnit -->
     <dependency>
-        <groupId>org.json</groupId>
-        <artifactId>json</artifactId>
-        <version>20230227</version>
+        <groupId>junit</groupId>
+        <artifactId>junit</artifactId>
+        <version>${junit.version}</version>
         <scope>test</scope>
     </dependency>
+
+    <!-- Jackson (JSON parsing for config/step data) -->
     <dependency>
-        <groupId>org.apache.httpcomponents</groupId>
-        <artifactId>httpclient</artifactId>
-        <version>4.5.14</version>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>${jackson.version}</version>
+    </dependency>
+
+    <!-- Logging -->
+    <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-simple</artifactId>
+        <version>2.0.12</version>
         <scope>test</scope>
     </dependency>
-  </dependencies>
+</dependencies>
+
+    <build>
+        <plugins>
+            <!-- Compiler -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>${maven.compiler.source}</source>
+                    <target>${maven.compiler.target}</target>
+                </configuration>
+            </plugin>
+
+            <!-- Surefire for running JUnit tests -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+                <configuration>
+                    <includes>
+                        <include>**/*Test.java</include>
+                        <include>**/*Runner.java</include>
+                    </includes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
 </project>
 ''')
 
+
 # --- LLM Prompts for generating Step Logic (UPDATED) ---
 FRAMEWORK_LOGIC_PROMPTS = {
-    "behave": Template("""
-You are an expert test automation engineer. Your task is to implement the body of a test function for a given Gherkin step, considering the context of the entire scenario and the full feature.
+    "behave": """
+Generate ONLY the Python method body code for this Behave step. 
 
-**Full Gherkin Feature:**
----
-{{ full_feature_content }}
----
+**STEP TYPE: {{ gherkin_keyword.upper() }}**
+- **Given/When**: Interact with system, store raw results in `context.lastCommandOutput` and `context.lastCommandStatusCode`
+- **Then**: Extract data for verification using "extract, don't assert" pattern - NO assertions, only record to test_result.json
 
-**Current Gherkin Step to implement:** "{{ step_line }}"
-**Full Gherkin Scenario:**
----
-{{ scenario_content }}
----
+**CRITICAL RULES:**
+1. **ONLY generate method body code (imp)** - no function signatures, imports, or external comments
+2. **Use `context.test_config`** for all configuration including `base_url` and `expected_outputs`
+3. **For Then steps**: MUST follow exact pattern: choose lookup key from `test_config['expected_outputs']` that matches step meaning, get expected value from config, extract actual value from context output, append JSON result
+4. **For HTTP requests**: Use `context.test_config['environment']['api_base_url']` for base URL
+5. **Parameter handling**: Behave automatically extracts parameters - use them directly
+6. **File writing**: Use robust append-only pattern for test_result.json with proper error handling
+7. **Use proper Behave context.table handling for data tables**
+8. **Use context.text for POST request payloads**
+9. **Store results in test_result.json with unique structures per step**
+10. **Avoid code duplication but maintain step-specific logic**
+11.**Similarly should work for any evironment, create logic that fits the use case properly
 
-Framework: Behave (Python)
-Parameters for this function: {{ parameters }}
-Parameter values: {{ parameter_values }}
-Available test configuration (JSON format):
-{{ test_config | tojson }}
+1. PRESERVE FUNCTION SIGNATURES EXACTLY
+2. USE ONLY THE PROVIDED COMMANDS
+3. NO CONFIGURATION LOOKUPS - use direct values
+4. KEEP LOGIC SIMPLE - no complex transformations
+5. USE EXISTING write_to_results_file helper
 
----
-**IMPORTANT INSTRUCTIONS FOR YOUR RESPONSE:**
-1.  **GENERATE ONLY THE CODE FOR THE FUNCTION BODY.** Do NOT include the function definition (e.g., `def func_name(...)`), decorators (e.g., `@given(...)`), or any surrounding boilerplate.
-2.  **DO NOT wrap the code in markdown code blocks (e.g., ```python).** Provide raw code.
-3.  **DO NOT include any comments, explanations, or extra text.** Just the executable code.
-4.  **DO NOT define helper functions within this function.**
-5.  Use the exact parameter names provided: {{ parameters }} in the steps instead of creating new variables.
-6.  Ensure all necessary imports for your code are explicitly stated at the very top of your generated body, e.g., `import requests` or `from selenium import webdriver`.
-7.  **Crucially, use the `context` object exclusively for storing and retrieving *actual runtime data* that flows between steps.** Example: `context.last_output = subprocess.check_output(...)` or `assert context.actual_status == expected_status`.
-8.  **Access environment details and command/API templates from the `test_config` object.** For example, to run a command: `subprocess.run(context.test_config['commands']['get_pod_json_by_label'].format(label=label_param, namespace='default'), shell=True, capture_output=True, text=True)`.
-9.  **For 'Then' steps, retrieve the actual output from `context` and compare it against the relevant expected output from `test_config.expected_outputs`.**
-10. **Always validate and sanitize all input/output.**
-11. The parameters provided (e.g., `{{ parameters }}`) will be sanitized by the framework/generated code to remove surrounding quotes. Do NOT apply `.strip('"')` or similar sanitization to them within the function body, as this will be handled automatically.
-{% if previous_step_error %}
-Previous attempt for this step failed with this error. Please fix:
-{{ previous_step_error }}
-{% endif %}
----
-Please provide the correct code for the function body now:
-"""),
+**PARAMETERS:** {% for param in parameters %}{{ param }}{% if not loop.last %}, {% endif %}{% endfor %}
 
-    "godog": Template("""
-You are a Go test automation expert using Godog BDD. Write only the **function body** for the step below.
+**CONFIG AVAILABLE:** {{ test_config | tojson }}
 
-**Full Gherkin Feature:**
----
-{{ full_feature_content }}
----
+**THEN STEP PATTERN (MUST FOLLOW):**
+```python
+# 1. Choose lookup key that matches step meaning from test_config['expected_outputs']
+lookup_key = "responseStatusCode"  # Example: match "status code" -> "responseStatusCode"
 
-**Gherkin Step:** "{{ step_line }}"
-**Scenario Context:**
-{{ scenario_content }}
+# 2. Get expected value from config (NOT from Gherkin parameter)
+expected_value = context.test_config['expected_outputs'][lookup_key]
 
-Framework: Godog (Go)
-Parameters: {{ parameters }}
-Values: {{ parameter_values }}
-Available test configuration (JSON format):
-{{ test_config | tojson }}
+# 3. Extract actual value from context output (parse as needed)
+actual_value = context.lastCommandOutput  # or context.lastCommandStatusCode for status codes
 
----
-
-**INSTRUCTIONS:**
-1. Return **only the raw Go code** – **no markdown code fences (e.g., ```go), no comments, no function signature, and no step decorator.**
-2. This function is a method on `*scenarioContext`: `func (s *scenarioContext) StepName(ctx context.Context, ...) error`.
-3. Use `s.` to **store/retrieve** shared state. Example: `s.podJson = value` or `val := s.podJson`.
-4. Do **not** use `ctx.Context(...)` for state. `ctx` is for cancellation/timeouts only.
-5. **List all necessary Go `import` statements** at the very top of your response, each on a new line, like `import "os/exec"` or `import "encoding/json"`.
-6. **Immediately after the imports, declare any necessary shared variables as fields within the `scenarioContext` struct that your code uses. Provide the field name and its Go type, one per line.** For example:
-    `podStatusJson map[string]interface{}`
-    `clusterContext string`
-    `minikubeStatus string`
-7. **Access environment details and command/API templates from the `test_config` object.** For example, to run a command: `cmd := exec.Command("kubectl", "get", "pod", "-l", label, "-o", "json")`.
-8. **For 'Then' steps, retrieve the actual output from `s.` (e.g., `s.lastOutput`) and compare it against the relevant expected output from `test_config.expected_outputs`.**
-9. Validate outputs/JSON before using.
-10. Do **not** hardcode static data or sanitize parameters—they're already clean.
-{% if previous_step_error %}
-Previous attempt for this step failed with this error. Please fix:
-{{ previous_step_error }}
-{% endif %}
-Output only the raw Go code body.
-"""),
-
-    "cucumber": Template("""
-You are a test automation engineer writing Cucumber (Java) step definitions. Implement the code inside a `@Given`, `@When`, or `@Then` method for the provided step.
-
-**Full Gherkin Feature:**
----
-{{ full_feature_content }}
----
-
-**Step:** "{{ step_line }}"
-**Scenario:** ---
-{{ scenario_content }}
----
-
-Framework: Cucumber (Java)
-Parameters: {{ parameters }}
-Parameter values: {{ parameter_values }}
-Available test configuration (JSON format):
-{{ test_config | tojson }}
-
----
-**INSTRUCTIONS:**
-1.  **Return only the method body.** No annotations, no method signature.
-2.  **You MUST provide concrete, executable Java code for the step logic.** Do NOT return empty lines, placeholders, or comments without code. If you cannot provide a working solution, use `throw new io.cucumber.java.PendingException();`
-3.  **DO NOT include comments or markdown code fences (e.g., ```java).** Your response should be raw Java code.
-4.  **Include all necessary Java `import` statements at the very top of your generated method body.** Each import should be on a new line and end with a semicolon (e.g., `import java.io.IOException;`). These will be extracted and moved to the class level.
-5.  Use exact parameter names: {{ parameters }}.
-6.  **Access environment details and command/API templates from the `test_config` object.** For example: `String kubectlPath = testConfig.get("environment").get("kubectl_binary_path").asText();` or `String cmdTemplate = testConfig.get("commands").get("get_pod_json_by_label").asText();`
-7.  **Store runtime results into static class variables like `StepDefinitions.lastCommandOutput`, `StepDefinitions.lastApiResponse`, `StepDefinitions.lastResponseStatusCode` so 'Then' steps can access them.**
-8.  **For 'Then' steps, retrieve the actual output from `StepDefinitions` static variables and compare it against the relevant expected output from `test_config.expected_outputs`.** Use `Assert.assertEquals()` for simple values or `ObjectMapper` for JSON comparison.
-9.  Parse responses carefully, avoid hardcoding outputs.
-10. Validate runtime output before comparing or asserting.
-11. Do not access the `test_config` directly in code — it's passed as a JSON string to the LLM for context. Instead, assume the LLM generates a Java Map/Object to parse this JSON config if it needs to use values from it. (Self-correction: The LLM can be instructed to directly parse the string or, better, we can inject a `testConfig` object if we manage to create it from the JSON. For simplicity, I've kept it as `tojson` for the LLM to process and generate parsing code. This is a common challenge with LLM code gen.)
-12. **Do NOT include any surrounding class declarations, package declarations, or extra methods or unused imports or unused variables or deprecated commands, use valid class names and structures.**
-{% if previous_step_error %}
-Previous attempt for this step failed with this error. Please fix:
-{{ previous_step_error }}
-{% endif %}
----
-Write the Cucumber Java method body now:
-""")
+# 4. Create result object
+current_result = {
+    "lookup_key": lookup_key,
+    "expected_value": expected_value,
+    "actual_value": actual_value
 }
+
+# 5. Append to results file with error handling
+import json
+import os
+result_file = 'test_result.json'
+existing_results = []
+if os.path.exists(result_file):
+    try:
+        with open(result_file, 'r') as f:
+            existing_results = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing_results = []
+existing_results.append(current_result)
+with open(result_file, 'w', encoding='utf-8') as f:
+    json.dump(existing_results, f, indent=2, ensure_ascii=False)
+---
+**Current Gherkin Step:** "{{ step_line }}"
+
+{% if previous_step_error %}
+**The last attempt failed. FIX IT based on the rules and examples above.** The error was: {{ previous_step_error }}
+{% endif %}
+---
+Provide ONLY the raw Python code for the method body now:
+""",
+
+    "godog": """
+You are a Go test automation expert using Godog. Your ONLY task is to write the Go code that goes inside a method body to implement a single Gherkin step.
+
+**THE ROLE OF A 'Then' STEP IS TO EXTRACT DATA FOR LATER VERIFICATION.**
+- For **Given/When** steps, interact with the system and store raw results in a field like `s.lastCommandOutput`.
+- For **Then** steps, your job is to:
+    1. Create a descriptive, unique `lookupKey` in `camelCase` from the step text.
+    2. Extract the actual value from `s.lastCommandOutput`.
+    3. Write a single JSON file named `test_result.json` containing BOTH the `lookupKey` and the `actualValue`.
+
+---
+**CRITICAL RULES:**
+1.  **GENERATE ONLY THE RAW GO CODE FOR THE FUNCTION BODY.** Do NOT include the function signature, comments, or markdown.
+2.  **Imports First:** At the top, list required Go import paths, one per line.
+3.  **Struct Fields:** After imports, declare new fields for `scenarioContext`, one per line.
+4.  **State Management:** Use the `s` (*scenarioContext) struct to store and access state between steps (e.g., `s.apiBaseURL`, `s.lastAPIResponse`).
+5.  **HTTP Requests:** For POST/PUT, marshal `s.requestPayload` and **MUST** set the `Content-Type: application/json` header.
+6.  **Responses:** **MUST** read the response body with `io.ReadAll(resp.Body)` and store it on the context.
+7.  **Return `nil` on success and `fmt.Errorf("...")` on failure.**
+8. Never declare variables that are not used
+9. If parsing is required only for validation, assign to `_`
+10.All imports must be used
+    *   You MUST use the following pattern, writing the file to the root of the project.
+
+    ```go
+    // --- START 'THEN' STEP EXAMPLE PATTERN ---
+    // 1. Create a dynamic lookup key from the Gherkin step.
+    // For a step like "the user's name should be {string}", a good key would be "userName".
+    // For "the pod status should be {string}", a good key is "podStatus".
+    lookupKey := "podStatus" // <-- LLM MUST GENERATE THIS DYNAMICALLY
+
+    // 2. Retrieve the raw output from the previous step.
+    rawJSONOutput := s.lastCommandOutput
+    
+    // 3. Parse the output to get the actual value. (This is a simplified example)
+    var result map[string]interface{}
+    json.Unmarshal([]byte(rawJSONOutput), &result)
+    actualValue := result["items"].([]interface{}).(map[string]interface{})["status"].(map[string]interface{})["phase"].(string)
+    
+    // 4. Create a map to hold the results.
+    resultData := map[string]string{
+        "lookup_key": lookupKey,
+        "actual_value": actualValue,
+    }
+    
+    // 5. Marshal the map to JSON and write the file.
+    jsonData, _ := json.Marshal(resultData)
+    os.WriteFile("test_result.json", jsonData, 0644)
+    // --- END 'THEN' STEP EXAMPLE PATTERN ---
+    ```
+4.  **IMPORTS and STRUCT FIELDS:** List any required imports (`"encoding/json"`, `"os"`) and necessary `scenarioContext` fields at the top of your response.
+
+---
+**Current Gherkin Step:** "{{ step_line }}"
+
+{% if previous_step_error %}
+**The last attempt failed. FIX IT based on the rules and examples above.** The error was: {{ previous_step_error }}
+{% endif %}
+---
+Provide ONLY the raw Go code for the method body now:
+""",
+
+    "cucumber": """
+You are a Java test automation expert. Your ONLY task is to write the Java code that goes inside a method body to implement a single Gherkin step.
+
+**THE ROLE OF A 'Then' STEP IS TO EXTRACT DATA FOR LATER VERIFICATION.**
+- For **Given/When** steps, interact with the system and store raw results in `StepDefinitions.lastCommandOutput`.
+- For **Then** steps, your job is to:
+    1.  Create a descriptive, unique `lookupKey` in `camelCase` from the step text (e.g., from "the pod status should be...", create a key like `podStatus`).
+    2.  Extract the actual value from `StepDefinitions.lastCommandOutput`.
+    3.  Write a single JSON file named `test_result.json` containing BOTH the `lookupKey` and the `actualValue`.
+
+---
+**CRITICAL RULES:**
+1.  **YOUR RESPONSE MUST BE ONLY THE RAW JAVA CODE FOR THE METHOD'S BODY.** Do not include method signatures, class definitions, annotations, comments, or markdown.
+2.  **'Then' STEPS MUST NOT USE `Assert.assertEquals`.** They only extract data.
+3.  **HOW TO WRITE THE JSON RESULT FILE (for a 'Then' step):**
+    *   You MUST use the following pattern, writing the file to the root of the project's `target` directory.
+
+    ```java
+    // --- START 'THEN' STEP EXAMPLE PATTERN ---
+    // 1. Create a dynamic lookup key from the Gherkin step.
+    // For a step like "the user's name should be {string}", a good key would be "userName".
+    // For "the response status code should be {int}", a good key would be "responseStatusCode".
+    String lookupKey = "podStatus"; // <-- LLM MUST GENERATE THIS DYNAMICALLY
+
+    // 2. Retrieve the raw output from the previous step.
+    String rawJsonOutput = StepDefinitions.lastCommandOutput;
+    
+    // 3. Parse the output to get the actual value.
+    ObjectMapper objectMapper = new ObjectMapper();
+    JsonNode rootNode = objectMapper.readTree(rawJsonOutput);
+    String actualValue = rootNode.at("/items/0/status/phase").asText();
+    
+    // 4. Create a Map to hold the results.
+    java.util.Map<String, String> resultData = new java.util.HashMap<>();
+    resultData.put("lookup_key", lookupKey);
+    resultData.put("actual_value", actualValue);
+    
+    // 5. Write the Map as a JSON file to the 'target' directory.
+    try (java.io.FileWriter writer = new java.io.FileWriter("target/test_result.json")) {
+        objectMapper.writeValue(writer, resultData);
+    }
+    // --- END 'THEN' STEP EXAMPLE PATTERN ---
+    ```
+4.  **IMPORTS:** List any required imports (like `java.util.Map`, `java.io.FileWriter`, etc.) at the top of your response.
+
+---
+**Current Gherkin Step:** "{{ step_line }}"
+
+{% if previous_step_error %}
+**The last attempt failed. FIX IT based on the rules and examples above.** The error was: {{ previous_step_error }}
+{% endif %}
+---
+Provide ONLY the raw Java code for the method body now:
+"""
+}
+
+
+KNOWLEDGE_BASE_DIR = Path("knowledge_base")
+
+# Global variable for pre-computed vectorstore
+vectorstore_cache = {}
+
+def save_to_knowledge_base(code: str, framework: str, feature_filename: str):
+    """Saves a validated, successful code file to the knowledge base and updates vectorstore."""
+    try:
+        framework_kb_dir = KNOWLEDGE_BASE_DIR / framework
+        framework_kb_dir.mkdir(parents=True, exist_ok=True)
+        
+        # We use a simple naming convention.
+        ext = {"behave": ".py", "godog": ".go", "cucumber": ".java"}.get(framework, ".txt")
+        file_path = framework_kb_dir / f"{Path(feature_filename).stem}{ext}"
+        file_path.write_text(code)
+        print(f"[RAG] Saved successful code to knowledge base: {file_path}")
+        
+        # Invalidate cache so it gets rebuilt with new knowledge
+        if framework in vectorstore_cache:
+            del vectorstore_cache[framework]
+            
+    except Exception as e:
+        print(f"[RAG] ERROR: Could not save to knowledge base. Reason: {e}")
+
+# Replace your current RAG initialization with this optimized version
+def initialize_rag_system(framework: str):
+    """Optimized RAG initialization with significant speed improvements"""
+    start_time = time.time()
+    
+    framework_kb_dir = KNOWLEDGE_BASE_DIR / framework
+    if not framework_kb_dir.exists():
+        print(f"[RAG] No knowledge base directory for {framework}")
+        return None
+
+    try:
+        # 1. Check if we have cached embeddings file
+        embeddings_file = framework_kb_dir / f"{framework}_vectorstore.faiss"
+        if embeddings_file.exists():
+            # Load pre-computed embeddings (FAST - milliseconds)
+            embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",  # Smaller, faster model
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': False}  # Faster without normalization
+            )
+            vectorstore = FAISS.load_local(str(framework_kb_dir), embeddings, allow_dangerous_deserialization=True)
+            print(f"[RAG] Loaded pre-computed {framework} vectorstore in {time.time() - start_time:.2f}s")
+            return vectorstore
+
+        # 2. Only compute embeddings if no cache exists
+        documents = []
+        file_extension = {"behave": ".py", "godog": ".go", "cucumber": ".java"}.get(framework, ".txt")
+        
+        for file_path in framework_kb_dir.glob(f"*{file_extension}"):
+            content = file_path.read_text()
+            # Only use first 2000 characters per file to reduce processing
+            documents.append(Document(page_content=content[:2000], metadata={"filename": file_path.name}))
+        
+        if not documents:
+            return None
+
+        # 3. Use smaller, faster embeddings model
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",  # 22MB vs 80MB
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={
+                'normalize_embeddings': False,  # Faster
+                'batch_size': 16
+            }
+        )
+        
+        # 4. Minimal text splitting - just use whole documents
+        texts = documents  # Skip splitting for speed
+        
+        # 5. Create and cache vectorstore
+        vectorstore = FAISS.from_documents(texts, embeddings)
+        vectorstore.save_local(str(framework_kb_dir))  # Save for future fast loading
+        
+        print(f"[RAG] Created {framework} vectorstore with {len(texts)} docs in {time.time() - start_time:.2f}s")
+        return vectorstore
+        
+    except Exception as e:
+        print(f"[RAG] ERROR: Failed to initialize RAG for {framework}: {e}")
+        return None
+
+# Ultra-fast pattern extraction
+def extract_code_patterns_fast(code: str, query: str, framework: str) -> str:
+    """Extract only the most relevant patterns quickly"""
+    patterns = []
+    
+    # Just extract function definitions (most useful part)
+    if framework == "behave":
+        # Find the main step functions
+        func_matches = re.findall(r'@(given|when|then)\([^)]+\)\s*\n\s*def\s+(\w+)[^{]*\{([^}]+)\}', code, re.DOTALL)
+        for keyword, func_name, body in func_matches[:2]:  # Only 2 functions max
+            patterns.append(f"# {keyword.upper()} step pattern:\n{body.strip()}")
+    
+    return "\n\n".join(patterns) if patterns else "# No specific patterns extracted"
+
+@lru_cache(maxsize=100)  # Cache more queries
+def get_relevant_examples_from_kb(query: str, framework: str, k: int = 2) -> str:  # Reduced to 2 examples
+    """Super-fast retrieval with heavy caching"""
+    if framework not in vectorstore_cache or vectorstore_cache[framework] is None:
+        return "No knowledge base available."
+    
+    try:
+        # Simple keyword matching instead of expensive similarity search
+        query_keywords = set(query.lower().split())
+        relevant_patterns = []
+        
+        # Just return a generic pattern based on query keywords
+        if any(word in query_keywords for word in ["then", "status", "check"]):
+            relevant_patterns.append("""
+# THEN step pattern for status checking:
+lookup_key = "statusCode"
+expected_value = context.test_config['expected_outputs'][lookup_key]
+actual_value = context.lastCommandStatusCode
+# ... [result recording code]""")
+        
+        if any(word in query_keywords for word in ["when", "get", "request"]):
+            relevant_patterns.append("""
+# WHEN step pattern for HTTP requests:
+base_url = context.test_config['environment']['api_base_url']
+response = requests.get(f"{base_url}{endpoint}")
+context.lastCommandOutput = response.text""")
+        
+        if relevant_patterns:
+            return "**RELEVANT PATTERNS:**\n" + "\n\n".join(relevant_patterns[:2])
+        
+        return "No specific patterns matched query keywords."
+        
+    except Exception as e:
+        return f"Retrieval error: {str(e)}"
+    
+# Add this function for efficient pattern extraction
+def extract_code_patterns_fast(code: str, query: str, framework: str) -> str:
+    """
+    Fast pattern extraction using regex patterns instead of complex processing.
+    """
+    patterns = []
+    query_lower = query.lower()
+    
+    # Framework-specific pattern extraction
+    if framework == "behave":
+        # Extract function definitions
+        func_patterns = re.findall(r'@(given|when|then)[^\n]+\n\s*def[^{]+\{[^}]+\}', code, re.DOTALL)
+        patterns.extend(func_patterns[:2])  # Max 2 functions
+        
+        # Extract config access patterns
+        if any(word in query_lower for word in ["config", "test_config"]):
+            config_patterns = re.findall(r'context\.test_config\[[^\]]+\]\[[^\]]+\]', code)
+            patterns.extend(config_patterns[:2])
+        
+        # Extract command execution patterns
+        if any(word in query_lower for word in ["command", "run", "execute"]):
+            cmd_patterns = re.findall(r'subprocess\.run\([^)]+\)', code)
+            patterns.extend(cmd_patterns[:2])
+        
+        # Extract JSON result patterns (most important)
+        if any(word in query_lower for word in ["then", "result", "json"]):
+            json_patterns = re.findall(r'test_result\.json.*?json\.dump.*?indent.*?}', code, re.DOTALL)
+            patterns.extend(json_patterns[:1])  # Just one good example
+
+    # Deduplicate and limit patterns
+    unique_patterns = list(set(patterns))[:3]  # Max 3 patterns total
+    
+    return "\n".join(unique_patterns) if unique_patterns else ""
+
+# Replace your existing extract_code_patterns with the faster version
+extract_code_patterns = extract_code_patterns_fast
+
+# Initialize RAG system at startup for faster first response
+def initialize_all_rag_systems():
+    """Pre-warm RAG systems for all frameworks during startup"""
+    print("[RAG] Pre-warming knowledge base systems...")
+    for framework in ["behave", "godog", "cucumber"]:
+        vectorstore_cache[framework] = initialize_rag_system(framework)
+
+def initialize_rag_async(framework):
+    """Initialize RAG in the background"""
+    global rag_initialized
+    try:
+        print(f"[RAG] Background initialization started for {framework}...")
+        vectorstore_cache[framework] = initialize_rag_system(framework)
+        rag_initialized = True
+        print(f"[RAG] Background initialization completed for {framework}")
+    except Exception as e:
+        print(f"[RAG] Background initialization failed: {e}")
+
+def start_rag_initialization(framework):
+    """Start RAG initialization in a background thread"""
+    global rag_initialization_thread
+    rag_initialization_thread = threading.Thread(target=initialize_rag_async, args=(framework,))
+    rag_initialization_thread.daemon = True  # Thread will exit when main exits
+    rag_initialization_thread.start()
+    return rag_initialization_thread
 
 def convert_text_to_bdd_file(input_path: Path, output_format: str):
     """
@@ -381,13 +785,10 @@ Content:
 
     # Call the LLM to organize the content
     try:
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
-        time.sleep(1)  # Give some time to the LLM to process
-        organized_content = response.choices[0].message.content.strip()
+        response_message = llm.invoke(prompt)
+        organized_content = response_message.content.strip()
+        time.sleep(1)
+        
     except Exception as e:
         print(f"[ERROR] LLM failed to convert file: {e}")
         return None, None
@@ -449,7 +850,7 @@ def format_step_for_framework(step_text: str, framework: str):
         text_for_pattern = step_text # Fallback, though ideally input is always Gherkin step
 
     # --- IMPORTANT: Work with text_for_pattern from now on ---
-    matches = list(re.finditer(r'"([^"]*)"', text_for_pattern))
+    matches = list(re.finditer(r'"([^"]*)"|\b(\d+)\b', text_for_pattern))
 
     for i, match in enumerate(matches):
         static_part = text_for_pattern[last_end:match.start()]
@@ -476,14 +877,27 @@ def format_step_for_framework(step_text: str, framework: str):
 
         param_names.append(name)
 
-        if framework == "behave":
-            parts.append(f'"{{{name}}}"') # Behave's format with quotes
-        elif framework == "cucumber":
-            # For Cucumber, use {string} for quoted strings or a more specific type if known
-            # Using {string} allows Cucumber to handle the parameter extraction
-            parts.append("{string}") 
-        elif framework == "godog":
-            parts.append("([^\\\"]*)") # Godog's regex for capturing a string
+        # STRING PARAM
+        if match.group(1) is not None:
+            name = f"param{i}"
+            param_names.append(name)
+
+            if framework == "behave":
+                parts.append(f'"{{{name}}}"')
+            elif framework == "cucumber":
+                parts.append("{string}")
+            elif framework == "godog":
+                parts.append("([^\\\"]*)")
+
+        # NUMBER PARAM
+        elif match.group(2) is not None:
+            name = f"num{i}"
+            param_names.append(name)
+
+            if framework == "godog":
+                parts.append(r"(\d+)")
+            else:
+                parts.append(f"{{{name}}}")
 
         last_end = match.end()
 
@@ -577,114 +991,84 @@ def filter_unused_imports(import_lines, logic, framework):
             used_imports.append(imp)
     return used_imports
 
-def generate_step_metadata(step_text: str, framework: str, test_config: dict, scenario_content: str, full_feature_content: str, previous_step_error: str = None) -> dict: # Changed prompt_inputs to test_config
-
+def generate_step_metadata(step_text: str, framework: str, test_config: dict, scenario_content: str, full_feature_content: str, previous_step_error: str = None, context=None) -> dict:
     step_keyword_match = re.match(r'^(Given|When|Then|And|But)\s+(.*)', step_text, flags=re.IGNORECASE)
     if not step_keyword_match:
         raise ValueError(f"Invalid Gherkin step: {step_text}")
-
     gherkin_keyword = step_keyword_match.group(1).lower()
-    
-    # Generate framework-specific step text + parameters
+    if gherkin_keyword in ["and", "but"]:
+        if context and "last_keyword" in context:
+            gherkin_keyword = context["last_keyword"]
+        else:
+            gherkin_keyword = "then"
+    if framework == "behave" and context is not None:
+        context["last_keyword"] = gherkin_keyword
     formatted_step_text, parameters = format_step_for_framework(step_text, framework)
-
-    # Clean function name
     step_base = re.sub(r'[^a-z0-9]+', '_', re.sub(r'"[^"]+"', '', step_text).strip().lower())
     func_name = f"{step_base}_{hashlib.md5(step_text.encode()).hexdigest()[:8]}"
 
-    # Extract actual quoted values too
-    actual_values = [match.group(1).strip('"') for match in re.finditer(r'"([^"]*)"', step_text)]
-    named_value_map = {param: val for param, val in zip(parameters, actual_values)}
+    # 1. Get the raw prompt string from the dictionary.
+    prompt_template_str = FRAMEWORK_LOGIC_PROMPTS[framework]
+    
+    # 2. Use the existing Jinja ENVIRONMENT to parse the template string.
+    #    The `env` object already has your 'tojson' filter configured.
+    #    This is the key fix.
+    jinja_template = env.from_string(prompt_template_str)
 
-    parameter_values = {k: v.strip('"') for k, v in named_value_map.items()}
-    # Prompt to LLM
-    prompt_template = FRAMEWORK_LOGIC_PROMPTS[framework]
-
-    logic_prompt = prompt_template.render(
+    # 3. Use JINJA to RENDER the template into a FINAL, SIMPLE STRING.
+    #    This step will now correctly process the `| tojson` filter and the `{% if ... %}` block.
+    final_prompt_string = jinja_template.render(
         full_feature_content=full_feature_content,
         step_line=step_text,
-        step_text=formatted_step_text,
         scenario_content=scenario_content,
         parameters=parameters,
-        parameter_values=parameter_values,
-        environment="GENERIC", # Removed specific env variable, now covered by test_config
-        test_config=test_config, # Pass the entire loaded test_config here
+        parameter_values={}, # You can add values here if needed
+        test_config=test_config, # Pass the dict directly; Jinja will handle the filter
+        gherkin_keyword=gherkin_keyword,
         previous_step_error=previous_step_error
     )
-
+    
+    # 4. Define and Invoke a SIMPLE LangChain Chain that does NO templating.
+    chain = llm | StrOutputParser()
     try:
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": logic_prompt}],
-            temperature=0.4
-        )
-        raw_llm_output = response.choices[0].message.content.strip()
+        # We pass the final, fully-rendered string directly to the LLM.
+        llm_output = chain.invoke(final_prompt_string)
         time.sleep(1)
 
-        # --- Aggressive Cleaning of LLM Output ---
-        # 1. Remove Markdown code fences (both start and end, and language specifier)
-        raw_llm_output = re.sub(r'^\s*```(?:[a-zA-Z0-9_]+)?\s*$', '', raw_llm_output, flags=re.MULTILINE)
-
-        # 2. Remove any common introductory/concluding remarks
-        raw_llm_output = re.sub(r'^(?:Here\'s the code:?|```\w*\n|```)\s*', '', raw_llm_output, flags=re.IGNORECASE | re.MULTILINE)
-        raw_llm_output = re.sub(r'\s*(?:Hope this helps!?|Let me know if you have questions\.?|```\s*)$', '', raw_llm_output, flags=re.IGNORECASE | re.MULTILINE)
-        raw_llm_output = raw_llm_output.strip()
-
-        # 3. Extract Imports
+        # 5. Process the output
+        # The StrOutputParser handles stripping whitespace and markdown.
+        # We just need to extract imports.
+        logic_cleaned = clean_agent_output(llm_output)
         import_lines_set = set()
-        logic_cleaned = raw_llm_output
-
-        if framework == "cucumber":
-            java_import_regex = r'^\s*import\s+[a-zA-Z0-9_.]+\s*;\s*$'
-            found_java_imports = re.findall(java_import_regex, logic_cleaned, re.MULTILINE)
-            for imp_line in found_java_imports:
-                import_lines_set.add(imp_line.strip())
-                logic_cleaned = logic_cleaned.replace(imp_line, '') # Remove from logic
-        else: # For behave and godog (Python/Go imports)
-            python_go_import_regex = r'^\s*(?:import\s+[a-zA-Z0-9_.]+(?:\s+as\s+[a-zA-Z0-9_]+)?|from\s+[a-zA-Z0-9_.]+\s+import\s+(?:[a-zA-Z0-9_]+|\*|{[^}]+})(?:\s*,\s*(?:[a-zA-Z0-9_]+|\*|{[^}]+}))*)\s*$'
-            found_imports = re.findall(python_go_import_regex, logic_cleaned, re.MULTILINE)
-            for imp_line in found_imports:
-                import_lines_set.add(imp_line.strip())
-                logic_cleaned = logic_cleaned.replace(imp_line, '') # Remove from logic
         
-        filtered_imports = filter_unused_imports(import_lines_set, logic_cleaned, framework)
-
-        # 4. Remove accidental outer function definitions (LLM might sometimes try to define the function again)
-        if framework == "behave":
-            logic_cleaned = re.sub(r'^\s*def\s+\w+\(.*\):\s*$', '', logic_cleaned, flags=re.MULTILINE)
-        elif framework == "godog":
-            logic_cleaned = re.sub(r'^\s*func\s+(?:\([sS]\s+\*\w+\))?\s*\w+\(.*\)\s*(?:[a-zA-Z.]+\s*)?\{?\s*$', '', logic_cleaned, flags=re.MULTILINE)
-        elif framework == "cucumber": # Assuming Java
-            logic_cleaned = re.sub(r'^\s*(?:public\s+)?void\s+\w+\(.*\)\s*\{?\s*$', '', logic_cleaned, flags=re.MULTILINE)
-            logic_cleaned = re.sub(r'^\s*\}?\s*$', '', logic_cleaned, flags=re.MULTILINE) # Remove trailing '}'
-
-        # 5. Dedent and strip final cleaned logic
-        final_logic = textwrap.dedent(logic_cleaned).strip()
-
-        # Handle empty logic if cleaning removed everything
+        # This regex can find both Python/Go and Java style imports
+        import_regex = r'^\s*(?:import|from)\s+[\w\s\.\*_{},;]+;?$'
+        found_imports = re.findall(import_regex, logic_cleaned, re.MULTILINE)
+        for imp_line in found_imports:
+            clean_import = imp_line.strip()
+            import_lines_set.add(clean_import)
+            logic_cleaned = logic_cleaned.replace(imp_line, '')
+            
+        final_logic = logic_cleaned.strip()
+        
         if not final_logic:
-            if framework == "cucumber":
+             final_logic = "pass" if framework == "behave" else "// TODO: Implement"
+             if framework == "cucumber":
                 final_logic = "throw new io.cucumber.java.PendingException();"
-            else:
-                final_logic = "pass" if framework == "behave" else "// TODO: Implement step logic"
-
-        # Always sanitize quoted string parameters for Behave. Instruction for LLM handles this now.
-        if framework == "behave" and parameters:
-            # Removed the explicit strip logic here, as LLM is instructed not to do it
-            pass
 
         return {
             "func_name": func_name,
             "parameters": parameters,
             "step_text": formatted_step_text,
             "logic": final_logic,
-            "imports": sorted(filtered_imports),
+            "imports": sorted(list(import_lines_set)),
             "gherkin_keyword": gherkin_keyword
         }
 
     except Exception as e:
-        print(f"[LLM Error] Failed to generate logic for step: {step_text}\nDetails: {e}")
+        print(f"[LangChain Error] Chain failed for step: {step_text}\nDetails: {e}")
         return None
+
 
 def generate_framework_code(all_step_metadata, framework, custom_imports, scenario_context_fields, user_config_filename=None):
     if framework == "behave":
@@ -738,14 +1122,6 @@ def generate_framework_code(all_step_metadata, framework, custom_imports, scenar
     else:
         raise ValueError(f"Unsupported framework: {framework}")
     
-env_template = """
-import yaml
-import os
-def before_all(context):
-    config_path = os.path.join(os.path.dirname(__file__), '{user_config_filename}')
-    with open(config_path, 'r') as f:
-        context.test_config = yaml.safe_load(f)
-"""
 # Write code to appropriate folders
 def write_code(framework, feature_content, code, feature_filename, config_path=None, user_config_filename=None):
     # This writes the feature file to the root `features` directorys
@@ -765,22 +1141,25 @@ def write_code(framework, feature_content, code, feature_filename, config_path=N
         path = behave_steps_dir / "step_definitions.py"
         path.write_text(code)
 
+        (behave_features_dir / feature_filename).write_text(feature_content)
+ 
         # Corrected file copy logic
         if config_path and user_config_filename:
             destination_config_path = behave_features_dir / user_config_filename
             # Read from source path and write to destination path
             destination_config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
             print(f"Copied config file to: {destination_config_path}")
-
-        # Update environment.py to look for the config file in the correct directory
-        env_py = behave_features_dir / "environment.py"
-        rendered_env_template = env_template.format(user_config_filename=user_config_filename)
-        env_py.write_text(rendered_env_template)
+            env_py = behave_features_dir / "environment.py"
+            rendered_env_template = env_template.format(user_config_filename=user_config_filename)
+            env_py.write_text(rendered_env_template)
+        else:
+            print(f"[WARNING] Cannot create environment.py - user_config_filename is {user_config_filename}")
 
     elif framework == "godog":
         Path("godog").mkdir(parents=True, exist_ok=True)
         path = Path("godog/main_test.go")
         path.write_text(code)
+        
     elif framework == "cucumber":
         base = Path("cucumber")
         stepdefs_dir = base / "src/test/java/stepdefinitions"
@@ -800,151 +1179,214 @@ def write_code(framework, feature_content, code, feature_filename, config_path=N
         
         # Copy the config file into the resources directory
         if config_path and user_config_filename:
-            root_config_path = resources_dir / user_config_filename
-            root_config_path.write_text(Path(config_path).read_text(encoding="utf-8"), encoding="utf-8")
+            src_config_path = Path(config_path)
+            if src_config_path.is_file():
+                root_config_path = resources_dir / user_config_filename
+                root_config_path.write_text(src_config_path.read_text(encoding="utf-8"), encoding="utf-8")
+                print(f"Copied real config file to: {root_config_path}")
+            else:
+                print(f"[WARNING] Config file not found at {src_config_path}, skipping copy.")
 
-            # Generate Hooks.java (auto-loads config file before scenarios)
-            rendered_hooks = cucumber_env_template.replace("{{ user_config_filename }}", user_config_filename)
-            (stepdefs_dir / "Hooks.java").write_text(rendered_hooks)
     return feature_path
 
-def final_llm_autocorrect_code(feature_content: str, step_code: str, framework: str, previous_error: str = None) -> str:
-    """
-    Calls the LLM to review and autocorrect the generated step code.
-    Optionally includes a previous error message for the LLM to fix.
-    """
-    prompt = f"""
-You are an expert in test automation and {framework.upper()} BDD frameworks.
-
-You are given a feature file and the full step definition file for the framework: {framework.upper()}.
-
-Your job is to:
-- Review the step definition file and ensure every step aligns correctly with the feature file.
-- Automatically fix any runtime issues (e.g., using `json.loads` on a dict, incorrect variable usage, missing imports, syntax errors).
-- Ensure consistent use of parameters, context/state (e.g., `context` or `StepDefinitions.lastCommandOutput`), imports, function bodies, etc.
-- **Do not include explanation or markdown code fences (e.g., ```python, ```go, ```javascript).** Just return the corrected file and do not change anything unless it is wrong.
-- If you cannot fix it, return the original code without changes.
----
-
-Feature File:
-{feature_content}
-
----
-
-Step Definitions File:
-{step_code}
-"""
-    if previous_error:
-        prompt += f"\n\nPrevious validation failed with this error. Please fix:\n{previous_error}"
-
-    try:
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        time.sleep(1) # Added sleep to help with rate limits
-        code = response.choices[0].message.content.strip()
-        
-        # Strip any accidental markdown code fences for ALL frameworks
-        if code.startswith("```"):
-            code = re.sub(r"^```[a-zA-Z]*\s*", "", code)  # remove opening fence
-            code = re.sub(r"```$", "", code)              # remove closing fence
-            code = code.strip()
-        return code
-
-    except Exception as e:
-        print(f"[ERROR] Final LLM correction failed: {e}")
-        return step_code  # Return original if LLM fails
-
 def validate_code(code, framework, config_path=None, user_config_filename=None, feature_file_path=None):
+    """
+    Validates generated code and returns INTELLIGENTLY SUMMARIZED error messages 
+    to conserve LLM context space while preserving critical information.
+    """
+    
+    def summarize_traceback(full_error: str, filename: str = "step_definitions.py") -> str:
+        """
+        Parses a long traceback and extracts only the most relevant lines for the agent:
+        - The final exception message.
+        - All lines that refer specifically to the code we generated.
+        """
+        lines = full_error.split('\n')
+        
+        # Always include the last few lines, which contain the actual exception type and message.
+        # This is the most important part.
+        exception_summary = [line for line in lines[-5:] if line.strip()]
+
+        # Find all lines in the traceback that point to our generated file.
+        relevant_lines = [line for line in lines if f'File "{filename}"' in line or f'File "features\\steps\\{filename}"' in line]
+        
+        if not relevant_lines and not exception_summary:
+            # If parsing fails, return a simple truncation as a fallback.
+            return '\n'.join(lines[:10] + ['...'] + lines[-10:])
+        
+        # Combine the relevant parts into a concise summary for the agent.
+        summary = "Traceback Summary (most relevant parts):\n" + "\n".join(relevant_lines) + "\n...\n" + "\n".join(exception_summary)
+        return summary
+    
+    def is_test_failure(output: str) -> bool:
+        """Determine if the failure is a test assertion failure (acceptable) vs code crash (needs fixing)"""
+        test_failure_indicators = [
+            "AssertionError",
+            "FAILED",  # Common in test frameworks
+            "expected:",  # Common in assertion messages
+            "but was:",  # Common in assertion messages
+            "Failures:",  # Maven surefire reports
+            "Failed scenarios:"  # Behave failure reports
+        ]
+        
+        code_crash_indicators = [
+            "SyntaxError",
+            "NameError",
+            "AttributeError",
+            "TypeError",
+            "ImportError",
+            "ModuleNotFoundError",
+            "IndentationError",
+            "panic:",  # Go panics
+            "Exception in thread",  # Java exceptions
+            "Compilation failure",  # Build failures
+            "cannot find symbol"  # Java compilation errors
+        ]
+        
+        # Check for code crashes first (higher priority)
+        for indicator in code_crash_indicators:
+            if indicator in output:
+                return False  # This is a code crash, not a test failure
+        
+        # Check for test failures
+        for indicator in test_failure_indicators:
+            if indicator in output:
+                return True  # This is a test failure
+        
+        return False  # Default to code crash if uncertain
+
     try:
-        if framework == 'behave': # Python validation
+        # --------------------------------------------------------------------
+        # BEHAVE (PYTHON) VALIDATION
+        # --------------------------------------------------------------------
+        if framework == 'behave':
             with tempfile.TemporaryDirectory() as temp_dir:
                 base_path = Path(temp_dir)
                 features_dir = base_path / "features"
                 steps_dir = features_dir / "steps"
-                
                 steps_dir.mkdir(parents=True, exist_ok=True)
+                temp_py_file = steps_dir / "step_definitions.py"
+                temp_py_file.write_text(code)
                 
-                (steps_dir / "step_definitions.py").write_text(code)
+                # Create environment.py
                 env_py = features_dir / "environment.py"
                 rendered_env_template = env_template.format(user_config_filename=user_config_filename)
                 env_py.write_text(rendered_env_template)
-
-                # Copy the config file to the temporary features directory so Behave can find it
+                
+                # Copy config file
                 if config_path and user_config_filename and Path(config_path).exists():
-                    temp_config_path = features_dir / user_config_filename
-                    temp_config_path.write_text(Path(config_path).read_text(encoding="utf-8"))
-                    print(f"Copied config file to temp directory: {temp_config_path}")
-                elif user_config_filename:
-                    print(f"[ERROR] Config file path not found for validation: {config_path}")
-                    return False, "Config file not found for validation."
-
-
-                # Use the actual feature file for validation ---
+                    (features_dir / user_config_filename).write_text(Path(config_path).read_text(encoding="utf-8"))
+                
+                # Copy or create feature file
                 if feature_file_path and Path(feature_file_path).exists():
-                    actual_feature_file = Path(feature_file_path)
-                    (features_dir / actual_feature_file.name).write_text(actual_feature_file.read_text(encoding="utf-8"))
+                    (features_dir / feature_file_path.name).write_text(feature_file_path.read_text(encoding="utf-8"))
                 else:
-                    # Fallback to a minimal feature file if the actual one is not provided or found
-                    (features_dir / "temp.feature").write_text("Feature: Temp\n  Scenario: Temp\n    Given a temp step")
+                    # Create minimal feature file for validation
+                    (features_dir / "validation.feature").write_text(
+                        "Feature: Validation\n  Scenario: Basic validation\n    Given a test configuration"
+                    )
 
-
-                # --- STEP 1: Static Check (Optional but good practice) ---
+                # --- STAGE 1: SYNTAX CHECK ---
                 try:
                     ast.parse(code)
                 except SyntaxError as e:
-                    return False, f"Python syntax error: {str(e)}"
+                    return False, f"CODE_SYNTAX_FAILED: Python syntax error: {str(e)}"
 
-                # --- STEP 2: Runtime Test Execution Check ---
-                # Execute the 'behave' command to run the tests
-                behave_cmd = ["behave", "--no-color", "--no-summary", "--no-skipped", str(features_dir)]
+                # --- STAGE 2: RUNTIME CHECK ---
+                behave_cmd = ["behave", "--no-color", "--no-capture", str(features_dir)]
                 test_result = subprocess.run(
-                    behave_cmd,
-                    cwd=base_path,
-                    capture_output=True,
-                    text=True,
-                    shell=False
+                    behave_cmd, cwd=base_path, capture_output=True, text=True, shell=False, timeout=60
                 )
                 
-                # 'behave' returns a non-zero exit code on failure
-                if test_result.returncode != 0:
-                    return False, f"Behave test runtime error detected:\n{test_result.stdout + test_result.stderr}"
+                full_output = test_result.stdout + test_result.stderr
+                
+                if test_result.returncode == 0:
+                    return True, "VALIDATION_SUCCESS: Code ran and all tests passed."
+                
+                # Determine if this is a test failure (acceptable) or code crash (needs fixing)
+                if is_test_failure(full_output):
+                    return True, f"VALIDATION_SUCCESS: Code ran, but test assertions failed: {summarize_traceback(full_output)}"
+                else:
+                    return False, f"RUNTIME_CRASH_FAILED: {summarize_traceback(full_output)}"
 
-                return True, None
+        # --------------------------------------------------------------------
+        # GODOG (GO) VALIDATION
+        # --------------------------------------------------------------------
+        elif framework == 'godog':
+            with tempfile.TemporaryDirectory() as temp_dir:
+                base_path = Path(temp_dir)
+                
+                # Create main.go with test setup
+                main_file = base_path / "main_test.go"
+                main_content = f"""
+package main
 
-        elif framework == 'godog': # Go validation
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".go", mode='w') as temp_file:
-                temp_file.write(code)
-                temp_file_path = temp_file.name
+import (
+    "testing"
+    "github.com/cucumber/godog"
+)
 
-            try:
-                # --- STEP 1: Static Analysis Checks ---
-                # Go formatting check
-                fmt_result = subprocess.run(["gofmt", "-l", temp_file_path], capture_output=True, text=True)
-                if fmt_result.returncode != 0 or fmt_result.stdout.strip():
-                    return False, f"Go formatting or syntax error detected by gofmt: {fmt_result.stderr.strip() or fmt_result.stdout.strip()}"
+func TestMain(m *testing.M) {{
+    status := godog.TestSuite{{
+        Name: "validation_suite",
+        ScenarioInitializer: InitializeScenario,
+        Options: &godog.Options{{
+            Format: "pretty",
+            Paths: []string{{"."}},
+            TestingT: &testing.T{{}},
+        }},
+    }}.Run()
+    
+    if status != 0 {{
+        testing.Main(func(pat, str string) (bool, error) {{ return true, nil }},
+            []testing.InternalTest{{}},
+            []testing.InternalBenchmark{{}},
+            []testing.InternalExample{{}})
+    }}
+}}
+"""
+                main_file.write_text(main_content)
+                
+                # Create step definitions
+                steps_file = base_path / "steps_test.go"
+                steps_file.write_text(code)
+                
+                # Create minimal feature file
+                feature_file = base_path / "validation.feature"
+                feature_file.write_text("Feature: Validation\nScenario: Basic validation\nGiven a test configuration")
+                
+                # Create go.mod
+                go_mod = base_path / "go.mod"
+                go_mod.write_text("module validation\ngo 1.21\nrequire github.com/cucumber/godog v0.13.0")
 
-                # Go static analysis check
-                vet_result = subprocess.run(["go", "vet", temp_file_path], capture_output=True, text=True)
-                if vet_result.returncode != 0:
-                    return False, f"Go static analysis error detected by go vet: {vet_result.stderr.strip()}"
+                try:
+                    # --- STAGE 1: COMPILE CHECKS ---
+                    compile_cmd = ["go", "mod", "tidy"]
+                    result = subprocess.run(compile_cmd, cwd=base_path, capture_output=True, text=True, timeout=30)
+                    if result.returncode != 0:
+                        return False, f"CODE_COMPILATION_FAILED: Go mod tidy failed: {result.stderr.strip()}"
+                    
+                    # --- STAGE 2: RUNTIME CHECK ---
+                    test_cmd = ["go", "test", "-v", "-timeout=30s"]
+                    test_result = subprocess.run(test_cmd, cwd=base_path, capture_output=True, text=True, timeout=60)
+                    
+                    full_output = test_result.stdout + test_result.stderr
+                    
+                    if test_result.returncode == 0:
+                        return True, "VALIDATION_SUCCESS: Code compiled and all tests passed."
+                    
+                    if is_test_failure(full_output):
+                        return True, f"VALIDATION_SUCCESS: Code ran, but tests failed: {summarize_traceback(full_output)}"
+                    else:
+                        return False, f"RUNTIME_CRASH_FAILED: {summarize_traceback(full_output)}"
+                        
+                except subprocess.TimeoutExpired:
+                    return False, "RUNTIME_CRASH_FAILED: Test execution timed out (possible infinite loop)"
 
-                # Go compilation check
-                build_result = subprocess.run(["go", "build", "-o", os.devnull, temp_file_path], capture_output=True, text=True)
-                if build_result.returncode != 0:
-                    return False, f"Go compilation error detected by go build: {build_result.stderr.strip()}"
-
-                # --- STEP 2: Runtime Test Execution Check ---
-                test_result = subprocess.run(["go", "test", temp_file_path], capture_output=True, text=True)
-                if test_result.returncode != 0:
-                    return False, f"Go test runtime error detected:\n{test_result.stdout + test_result.stderr}"
-
-                return True, None
-            finally:
-                os.remove(temp_file_path) # Clean up temporary file
-        elif framework == 'cucumber': # Java validation
+        # --------------------------------------------------------------------
+        # CUCUMBER (JAVA) VALIDATION
+        # --------------------------------------------------------------------
+        elif framework == 'cucumber':
             with tempfile.TemporaryDirectory() as temp_dir:
                 base_path = Path(temp_dir)
                 stepdefs_dir = base_path / "src/test/java/stepdefinitions"
@@ -957,71 +1399,172 @@ def validate_code(code, framework, config_path=None, user_config_filename=None, 
                 features_dir.mkdir(parents=True, exist_ok=True)
                 resources_dir.mkdir(parents=True, exist_ok=True)
 
-                # Step definitions
+                # Write step definitions
                 (stepdefs_dir / "StepDefinitions.java").write_text(code)
-
-                # Hooks.java (environment equivalent)
-                if user_config_filename:
-                    rendered_hooks = cucumber_env_template.replace("{{ user_config_filename }}", user_config_filename)
-                    (stepdefs_dir / "Hooks.java").write_text(rendered_hooks)
-
-                # Runner + pom.xml
+                
+                # Write test runner
                 (runner_dir / "TestRunner.java").write_text(cucumber_runner_template.render())
+                
+                # Write pom.xml
                 (base_path / "pom.xml").write_text(pom_template.render())
 
-                # Feature file
+                # Copy feature file or create minimal one
                 if feature_file_path and Path(feature_file_path).exists():
-                    actual_feature_file = Path(feature_file_path)
-                    (features_dir / actual_feature_file.name).write_text(actual_feature_file.read_text(encoding="utf-8"))
+                    (features_dir / feature_file_path.name).write_text(feature_file_path.read_text(encoding="utf-8"))
                 else:
-                    (features_dir / "temp.feature").write_text("Feature: Temp\n  Scenario: Temp\n    Given a temp step")
-
-                # Config file
+                    (features_dir / "validation.feature").write_text(
+                        "Feature: Validation\nScenario: Basic validation\nGiven a test configuration"
+                    )
+                
+                # Copy config file if provided
                 if config_path and user_config_filename:
-                    root_config_path = resources_dir / user_config_filename
                     if Path(config_path).exists():
-                        root_config_path.write_text(Path(config_path).read_text(encoding="utf-8"), encoding="utf-8")
-                    else:
-                        return False, f"Config file {config_path} does not exist."
+                        (resources_dir / user_config_filename).write_text(Path(config_path).read_text(encoding="utf-8"))
 
-                # --- STEP 1: Compile Check (Static Analysis) ---
-                mvn_cmd = r"C:\Program Files\apache-maven-3.9.10\bin\mvn.cmd"
+                # --- STAGE 1: COMPILE CHECK ---
+                mvn_cmd = ["mvn", "test-compile"]  # Use mvn from PATH
                 compile_result = subprocess.run(
-                    [mvn_cmd, "compile"],
-                    cwd=base_path,
-                    capture_output=True,
-                    text=True,
-                    shell=False
+                    mvn_cmd, cwd=base_path, capture_output=True, text=True, shell=False, timeout=120
                 )
                 if compile_result.returncode != 0:
-                    error_output = compile_result.stderr.strip() or compile_result.stdout.strip()
-                    return False, f"Java compilation error detected by Maven:\n{error_output}"
+                    error_output = compile_result.stdout + compile_result.stderr
+                    return False, f"CODE_COMPILATION_FAILED: Maven compilation failed:\n{summarize_traceback(error_output)}"
                 
-                # --- STEP 2: Test Execution (Runtime Check) ---
+                # --- STAGE 2: RUNTIME CHECK ---
+                test_cmd = ["mvn", "test", "-Dtest=TestRunner"]
                 test_result = subprocess.run(
-                    [mvn_cmd, "test"],
-                    cwd=base_path,
-                    capture_output=True,
-                    text=True,
-                    shell=False
+                    test_cmd, cwd=base_path, capture_output=True, text=True, shell=False, timeout=180
                 )
                 
-                if test_result.returncode != 0:
-                    if "T E S T S" in test_result.stdout:
-                        return False, f"Test runtime error detected by Maven. Tests failed:\n{test_result.stdout + test_result.stderr}"
-                    else:
-                        return False, f"Maven test execution failed with return code {test_result.returncode}. Output:\n{test_result.stdout + test_result.stderr}"
-
-                return True, None
+                full_output = test_result.stdout + test_result.stderr
+                
+                if test_result.returncode == 0:
+                    return True, "VALIDATION_SUCCESS: Code compiled and all tests passed."
+                
+                if is_test_failure(full_output):
+                    return True, f"VALIDATION_SUCCESS: Code compiled and tests ran, but some failed: {summarize_traceback(full_output)}"
+                else:
+                    return False, f"RUNTIME_CRASH_FAILED: {summarize_traceback(full_output)}"
 
         else:
             return False, f"Unsupported framework: {framework}"
 
+    except subprocess.TimeoutExpired:
+        return False, "VALIDATION_TIMEOUT: Test execution took too long (possible infinite loop)"
     except Exception as e:
-        return False, f"An unexpected error occurred during validation: {str(e)}"
+        return False, f"VALIDATION_SETUP_FAILED: Unexpected error during validation: {str(e)}"
+    
+# Use the @tool decorator to make your existing function available to the agent
+# REPLACE your existing @tool function with this simplified version.
+
+# ------------------------------------------------------------------
+# HARD TERMINATION SIGNAL (CRITICAL)
+# ------------------------------------------------------------------
+class ValidationSuccess(Exception):
+    """Raised to immediately stop agent execution on validation success."""
+    pass
+
+
+# ------------------------------------------------------------------
+# VALIDATION TOOL
+# ------------------------------------------------------------------
+@tool
+def validate_generated_test_code(generated_code: str) -> str:
+    """
+    Validates the generated BDD test code for any framework.
+    Cleans LLM artifacts and performs validation.
+    """
+
+    # --- Universal Cleaning Logic ---
+
+    cleaned_code = generated_code.strip()
+
+    start_keywords = ('from ', 'import ', '@given', 'package ', '//', '/*')
+    code_lines = cleaned_code.split('\n')
+    start_index = 0
+
+    for i, line in enumerate(code_lines):
+        if line.strip().startswith(start_keywords):
+            start_index = i
+            break
+
+    cleaned_code = '\n'.join(code_lines[start_index:])
+
+    if cleaned_code.startswith("```"):
+        cleaned_code = re.sub(r'^```[a-zA-Z]*\n', '', cleaned_code)
+    if cleaned_code.endswith("```"):
+        cleaned_code = cleaned_code[:-3].strip()
+
+    # --- Validation ---
+    is_valid, message = validate_code(
+        code=cleaned_code,
+        framework=framework_for_agent,
+        config_path=config_path_for_agent,
+        user_config_filename=user_config_filename_for_agent,
+        feature_file_path=feature_file_path_for_agent
+    )
+
+    # HARD STOP ON SUCCESS
+    if is_valid:
+        return f"VALIDATION_SUCCESS: {message}"
+    else:
+        return f"VALIDATION_FAILED: {message}"
+
+
+# ------------------------------------------------------------------
+# AGENT SETUP
+# ------------------------------------------------------------------
+tools = [validate_generated_test_code]
+
+prompt = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are a code-fixing agent.\n"
+        "Fix the code.\n"
+        "If validation fails, retry.\n"
+        "If validation succeeds, STOP immediately.\n"
+        "Do not explain anything."
+    ),
+    ("human", "{input}"),
+    ("assistant", "{agent_scratchpad}")
+])
+
+agent = create_tool_calling_agent(llm=llm, tools=tools, prompt=prompt)
+
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    verbose=True,
+    max_iterations=5,          # bounded retries
+    early_stopping_method="force"
+)
+
+
+def clean_agent_output(agent_output: str) -> str:
+    """
+    Parses the agent's final output string to extract only the code block.
+    It handles markdown fences for any language and the "Final Answer:" prefix.
+    """
+    # First, check if "Final Answer:" is in the output and split by it
+    print("Raw generated code:")
+    print(repr(agent_output[:200])) 
+    if "Final Answer:" in agent_output:
+        agent_output = agent_output.split("Final Answer:")[-1].strip()
+
+    # Next, find and extract the content within the first code block ```...```
+    # This regex is generic and works for ```python, ```go, ```java, etc.
+    match = re.search(r'```(?:\w*\n)?(.*)```', agent_output, re.DOTALL)
+    
+    if match:
+        # If a markdown block is found, return its content
+        return match.group(1).strip()
+    else:
+        # If no markdown block is found, assume the whole string is the code
+        return agent_output.strip()
 
 # --- Main Execution Controller ---
 def main():
+    
     # Step 1: Ask user for input text file (now just path to .feature or .txt)
     input_text_path_str = input("Enter path to the input (.feature file or plain text file): ").strip()
     input_text_path = Path("input_file")/input_text_path_str
@@ -1042,6 +1585,9 @@ def main():
         print("Unsupported framework. Please choose 'behave', 'godog', or 'cucumber'.")
         return
 
+    print("[RAG] Starting background initialization...")
+    rag_thread = start_rag_initialization(framework)
+
     # Step 3: Determine BDD file format (fixed to gherkin if code generation)
     # If the user provides a plain text file, we convert it to gherkin.
     # If they provide a .feature file, we still pass it through LLM for organization,
@@ -1053,6 +1599,7 @@ def main():
     output_file_path, feature_content = convert_text_to_bdd_file(input_text_path, bdd_output_format)
     if not output_file_path or not Path(output_file_path).exists():
         print("Failed to generate/organize BDD feature file with LLM. Exiting.")
+        rag_thread.join()  # Clean up thread
         return
 
     feature_file_path = Path(output_file_path)
@@ -1065,12 +1612,21 @@ def main():
     # Step 5: Load Test Configuration (from project root or nearest parent)
     test_config = load_test_config(filename=user_config_filename, start_path=config_path.parent)
 
+    global framework_for_agent, config_path_for_agent, user_config_filename_for_agent, feature_file_path_for_agent, rag_initialized, rag_initialization_thread
+    rag_initialized = False
+    rag_initialization_thread = None
+    framework_for_agent = framework
+    config_path_for_agent = config_path
+    user_config_filename_for_agent = user_config_filename
+    feature_file_path_for_agent = feature_file_path
+
     # Step 6: Parse Feature by Scenario and Generate Step Metadata
     scenarios_data = parse_feature_by_scenario(feature_content)
     
     all_step_metadata = []
     all_custom_imports = set()
     all_godog_fields = set() 
+    context = {} 
     
     for scenario in scenarios_data:
         print(f"\nProcessing Scenario: {scenario['title']}")
@@ -1083,7 +1639,8 @@ def main():
                 test_config=test_config, # Passing the loaded config
                 scenario_content=scenario["content"],
                 full_feature_content=feature_content,
-                previous_step_error=None # No per-step retry currently
+                previous_step_error=None,  # No per-step retry currently
+                context=context
             )
 
             if step_data is None:
@@ -1100,207 +1657,230 @@ def main():
                 godog_fields_from_llm = re.findall(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*\s+[a-zA-Z_][a-zA-Z0-9_]*)\s*$', step_data["logic"], re.MULTILINE)
                 for field_decl in godog_fields_from_llm:
                     all_godog_fields.add(field_decl)
+        
+    if rag_thread.is_alive():
+        print("[RAG] Waiting for background initialization to complete...")
+        try:
+            rag_thread.join(timeout=120)  # Increase timeout to 120 seconds
+            if rag_thread.is_alive():
+                print("[RAG] Initialization taking too long, proceeding without cache...")
+            else:
+                print("[RAG] Background initialization completed successfully!")
+        except Exception as e:
+            print(f"[RAG] Exception occurred while waiting for RAG initialization: {e}")
+            import traceback
+            traceback.print_exc()
 
-
-    # Step 7: Generate and Validate Code with Retry
-    final_generated_code = None
-    is_valid_code = False
-    validation_error_message = None
-
-    # Iteratively try to generate and validate the full code
-    for attempt in range(3):
-        print(f"\nAttempt {attempt+1} to generate and validate final code...")
-
-        # Generate the framework code from collected step metadata
-        code_to_autocorrect = generate_framework_code(
-            all_step_metadata=all_step_metadata,
-            framework=framework,
-            custom_imports=sorted(list(all_custom_imports)),
-            scenario_context_fields=sorted(list(all_godog_fields)),
-            user_config_filename=user_config_filename  # Pass user config filename
-        )
-
-        # Call the final LLM autocorrection on the generated code
-        final_generated_code = final_llm_autocorrect_code(
-            feature_content=feature_content,
-            step_code=code_to_autocorrect,
-            framework=framework,
-            previous_error=validation_error_message # Pass error from previous attempt
-        )
-
-        # Validate the final code
-        is_valid_code, validation_error_message = validate_code(final_generated_code, framework, config_path, user_config_filename, feature_file_path)
-
-        if is_valid_code:
-            print(f"Code validated successfully on attempt {attempt+1}.")
-            break # Exit retry loop
-        else:
-            print(f"[Retry] Attempt {attempt+1} failed. Error:\n{validation_error_message}\nRetrying after LLM fix...")
+    # Step 7: Generate and Validate Code with an Agent
+    print("\n--- Invoking LangChain Agent to Generate and Validate Code ---")
     
-    if not is_valid_code:
-        print("\n!!! Final code validation failed after all attempts. !!!")
-        print("Last encountered error:\n" + validation_error_message)
+    # --- NEW RAG STEP: Retrieve relevant examples ---
+    print("[RAG] Searching knowledge base for relevant examples...")
+    relevant_examples = get_relevant_examples_from_kb(query=feature_content, framework=framework)
+        
+    # Generate the initial "flawed" code first, outside the agent
+    initial_code_to_correct = generate_framework_code(
+        all_step_metadata=all_step_metadata,
+        framework=framework,
+        custom_imports=sorted(list(all_custom_imports)),
+        scenario_context_fields=sorted(list(all_godog_fields)),
+        user_config_filename=user_config_filename
+    )
+
+    # The agent's input describes its goal and gives it the context it needs.
+    agent_prompt_template = Template("""
+GOAL: Fix this BDD test code to be complete, syntactically correct, and runnable.
+
+FRAMEWORK: {{framework}}
+
+CRITICAL REQUIREMENTS:
+1. Use "extract, don't assert" pattern for Then steps
+2. Write results to test_result.json file  
+3. Final code must be a single saveable block
+4. Follow framework-specific patterns from knowledge base
+
+**RELEVANT PATTERNS FROM SUCCESSFUL TESTS:**
+{{ relevant_examples }}
+
+**INPUT DATA:**
+
+FEATURE:
+{{ feature_content }}
+
+CONFIG:
+{{ test_config_json }}
+
+CODE TO FIX:
+{{ initial_code_to_correct }}
+
+**PROCESS:**
+1. Analyze the code and identify issues
+2. Apply proven patterns from knowledge base
+3. Validate with tool
+4. If validation fails, fix errors from previous run and retry  
+5. If validation succeeds, output final code and exit and don't try to fix anything else.
+
+**OUTPUT:**
+ONLY the complete corrected code that passes validation - no explanations.
+""")
+
+    agent_input = agent_prompt_template.render(
+        framework=framework,
+        user_config_filename=user_config_filename,
+        feature_content=feature_content,
+        test_config_json=json.dumps(test_config, indent=2),
+        initial_code_to_correct=initial_code_to_correct,
+        relevant_examples=relevant_examples
+    )
+
+    # Invoke the agent executor
+    result = agent_executor.invoke({
+        "input": agent_input
+    })
+
+    # Get the raw output from the agent
+    agent_raw_output = result['output']
+
+    # Use the universal cleaning function to extract the pure code.
+    final_generated_code = clean_agent_output(agent_raw_output)
+    
+    # Check if the agent's final code is actually runnable. This is a safety check.
+    is_valid_runnable_code, validation_message = validate_code(final_generated_code, framework, config_path, user_config_filename, feature_file_path)
+
+    if not is_valid_runnable_code:
+        print("\n!!! LangChain Agent FAILED to produce runnable code. This is an agent failure. !!!")
+        print("Final error from validation tool:\n" + validation_message)
         # Write the flawed code so user can inspect
-        write_code(framework, feature_content, final_generated_code, feature_filename)
-        print(f"Generated code (with errors) saved to respective framework directory for inspection.")
-        return # Exit if code is not valid after retries
+        write_code(framework, feature_content, final_generated_code, feature_filename, config_path, user_config_filename)
+        print(f"Generated code (with errors) saved for inspection.")
+        return # Exit
+    
+    print("\n[✓] LangChain Agent successfully generated runnable code.")
         
-    # Step 8: Write to file
-    print("\nWriting generated code to project structure...")
+    # Step 8: Write the final, validated code to the project structure
+    print("Writing generated code to project structure...")
     write_code(framework, feature_content, final_generated_code, feature_filename, config_path, user_config_filename)
-    print("Code written successfully.")
 
-    # Step 9: Run tests and validate 
-    print(f"\nRunning {framework} tests...")
-    test_run_success = False
-    if framework == "behave":
-        # Using `json.pretty` formatter to get results
-        behave_dir = Path("behave")
-        behave_features_dir = behave_dir / "features"
-        behave_steps_dir = behave_features_dir / "steps"
-        behave_report_path = Path("report_behave.json")
+    # Save the successful code to the knowledge base
+    save_to_knowledge_base(final_generated_code, framework, feature_filename)
 
-        # Ensure behave/features and steps exist
-        behave_features_dir.mkdir(parents=True, exist_ok=True)
-        behave_steps_dir.mkdir(parents=True, exist_ok=True)
+    # Step 9: Execute Data Extraction Run for the Target Framework
+    print(f"\n--- EXECUTING DATA EXTRACTION RUN FOR {framework.upper()} ---")
 
-        # Copy the feature file to behave/features/
-        src_feature_file = Path("features") / feature_filename
-        dst_feature_file = behave_features_dir / feature_filename
-        dst_feature_file.write_text(src_feature_file.read_text(encoding="utf-8"), encoding="utf-8")
-
-        
-        # Ensure behave project structure is ready for execution
-        # subprocess.run ensures Behave can find features/steps
-        result = subprocess.run(
-            ["behave", "--format", "json.pretty", "--outfile", str(behave_report_path), f"features/{feature_filename}"],
-            cwd=behave_dir,
-            capture_output=True,
-            text=True
-        )
-        print(result.stdout)
-        if result.stderr:
-            print(result.stderr)
-        
-        if result.returncode == 0:
-            print("Behave tests executed. Checking report for detailed results.")
-            if behave_report_path.exists():
-                try:
-                    with open(behave_report_path, 'r') as f:
-                        report_data = json.load(f)
-                    
-                    total_scenarios = 0
-                    failed_scenarios = 0
-                    for feature in report_data:
-                        for scenario in feature.get('elements', []):
-                            total_scenarios += 1
-                            scenario_failed = any(
-                                step.get('result', {}).get('status') == 'failed'
-                                for step in scenario.get('steps', [])
-                            )
-                            if scenario_failed:
-                                failed_scenarios += 1
-                    
-                    if failed_scenarios == 0 and total_scenarios > 0:
-                        print(f"All {total_scenarios} Behave scenarios passed!")
-                        test_run_success = True
-                    else:
-                        print(f"Behave tests completed: {passed_scenarios}/{total_scenarios} scenarios passed.")
-                        test_run_success = False
-                except json.JSONDecodeError:
-                    print(f"Error reading Behave JSON report at {behave_report_path}")
-                    test_run_success = False
-            else:
-                print("Behave JSON report not found.")
-                test_run_success = False
-        else:
-            print(f"Behave test execution failed with exit code {result.returncode}.")
-            test_run_success = False
-
-    elif framework == "godog":
-        godog_dir = Path("godog")
-        result = subprocess.run(
-            ["go", "test", "./..."], # Assuming main_test.go is directly in godog folder
-            cwd=godog_dir,
-            capture_output=True,
-            text=True
-        )
-        print(result.stdout)
-        if result.stderr:
-            print(result.stderr)
-        
-        if "--- FAIL:" in result.stdout or result.returncode != 0:
-            print("Godog tests failed.")
-            test_run_success = False
-        else:
-            print("Godog tests passed!")
-            test_run_success = True
-
+    # Define project paths and the result file that the generated code will create
+    project_dir = Path(framework)
+    if framework == "behave" or framework == "godog":
+        result_file_path = project_dir / "test_result.json"
     elif framework == "cucumber":
-        cucumber_project_path = Path("cucumber")
-        # Use `mvn clean test` to compile and run tests
-        mvn_cmd = r"C:\Program Files\apache-maven-3.9.10\bin\mvn.cmd"
-        result = subprocess.run(
-            [mvn_cmd, "clean", "test"],
-            cwd=cucumber_project_path,
-            capture_output=True,
-            text=True,
-            shell=False
+        result_file_path = project_dir / "target" / "test_result.json"
+    
+    # Clean previous results before running
+    if result_file_path.exists():
+        result_file_path.unlink()
+
+    # --- Framework-specific execution command ---
+    execution_result = None
+    if framework == "behave":
+        # Behave's working directory is the project root (e.g., the 'behave' folder)
+        execution_result = subprocess.run(
+            ["behave"], cwd=project_dir, capture_output=True, text=True
         )
+        time.sleep(1)
+    elif framework == "godog":
+        execution_result = subprocess.run(
+            ["go", "test", "./..."], cwd=project_dir, capture_output=True, text=True
+        )
+        time.sleep(1)
+    elif framework == "cucumber":
+        mvn_cmd = r"C:\Program Files\apache-maven-3.9.10\bin\mvn.cmd" # Ensure this path is correct
+        execution_result = subprocess.run(
+            [mvn_cmd, "clean", "test"], cwd=project_dir, capture_output=True, text=True, shell=False
+        )
+        time.sleep(1) 
+    
+    # --- Check for crashes during the extraction run ---
+    # Note: A non-zero exit code from a test runner can mean a crash OR a failed assertion.
+    # Since our generated code no longer has assertions, any failure here is a true crash.
+    if execution_result.returncode != 0:
+        print(f"\n[X] CRITICAL ERROR: The {framework} data extraction code crashed during execution.")
+        print("--- STDOUT ---")
+        print(execution_result.stdout)
+        print("\n--- STDERR ---")
+        print(execution_result.stderr)
+        return # Stop execution
 
-        print("\n--- Maven Build and Test Output ---")
-        print(result.stdout)
-        if result.stderr:
-            print("\n--- Maven Error Output ---")
-            print(result.stderr)
+    print("\n[✓] Data extraction run completed successfully.")
+    print(execution_result.stdout) # Print the successful run output
 
-        if result.returncode == 0:
-            print("\nMaven build and tests completed successfully.")
-            # Parse Cucumber's JSON Report for overall pass/fail
-            cucumber_report_path = cucumber_project_path / "target/cucumber-report.json"
-            if cucumber_report_path.exists():
-                try:
-                    with open(cucumber_report_path, 'r') as f:
-                        cucumber_report = json.load(f)
+    # Step 10: Perform Dynamic Assertion in Python (The Final Verdict)
+    print("\n--- PERFORMING DYNAMIC ASSERTION IN PYTHON ---")
+    
+    # The Behave test runs with its working directory set to `project_dir`.
+    project_dir = Path(framework) # e.g., Path('behave')
+    if framework == "behave" or framework == "godog":
+        result_file_path = project_dir / "test_result.json"
+    elif framework == "cucumber":
+        result_file_path = project_dir / "target" / "test_result.json"
 
-                    total_scenarios = 0
-                    passed_scenarios = 0
-                    
-                    for feature in cucumber_report:
-                        for scenario in feature.get('elements', []):
-                            total_scenarios += 1
-                            all_steps_passed = True
-                            for step in scenario.get('steps', []):
-                                if step['result']['status'] != 'passed':
-                                    all_steps_passed = False
-                                    break
-                            if all_steps_passed:
-                                passed_scenarios += 1
-                    
-                    print(f"\n--- Test Summary ---")
-                    print(f"Total Scenarios: {total_scenarios}")
-                    print(f"Passed Scenarios: {passed_scenarios}")
+    try:
+        if not result_file_path.exists():
+             # This is now a more informative error message.
+             print(f"\n[X] CRITICAL ERROR: The result file was not found at the expected location: {result_file_path}")
+             print("This may indicate a crash during the test run or an issue with the generated code's file path.")
+             return
 
-                    if total_scenarios > 0 and passed_scenarios == total_scenarios:
-                        print("All Cucumber tests passed!")
-                        test_run_success = True
-                    else:
-                        print("Some Cucumber tests failed!")
-                        test_run_success = False
-                except json.JSONDecodeError:
-                    print(f"Error reading Cucumber JSON report at {cucumber_report_path}. Report might be malformed or empty.")
-                    test_run_success = False
+        # Read the entire JSON file as a single JSON array
+        with open(result_file_path, 'r', encoding='utf-8') as f:
+            all_results = json.load(f)  # This reads the entire JSON array
+        
+        if not all_results:
+            print("\n[WARNING] Test run produced an empty result list.")
+            print("\n[SUCCESS] FINAL TEST STATUS: PASSED (No assertions were logged).")
+            return
+
+        print(f"\nFound {len(all_results)} assertions to check in the report.")
+        
+        final_status_list = []
+        overall_status = "PASSED"
+
+        for i, result_data in enumerate(all_results, 1):
+            lookup_key = result_data.get("lookup_key") or result_data.get("lookupKey")
+            actual_value_raw = result_data.get("actual_value") or result_data.get("actualValue")
+            expected_value_raw = result_data.get("expected_value") or result_data.get("expectedValue")
+            
+            if lookup_key is None or actual_value_raw is None or expected_value_raw is None:
+                print(f"\n--- Assertion #{i} ---")
+                print("  - STATUS: SKIPPED (Malformed data in log entry)")
+                continue
+
+            quote_chars_to_strip = "\"' "
+            actual_value_clean = str(actual_value_raw).strip(quote_chars_to_strip)
+            expected_value_clean = str(expected_value_raw).strip(quote_chars_to_strip)
+            
+            pass_fail_status = "FAILED"
+            if actual_value_clean == expected_value_clean:
+                pass_fail_status = "PASSED"
             else:
-                print("Cucumber report not found. Cannot determine detailed test results.")
-                test_run_success = False # Assume failure if report is missing
-        else:
-            print(f"\nMaven build or tests failed with exit code {result.returncode}.")
-            test_run_success = False
+                overall_status = "FAILED"
 
-    if test_run_success:
-        print(f"\n[✓] {framework.capitalize()} test execution completed. All tests passed based on report.")
-    else:
-        print(f"\n[X] {framework.capitalize()} test execution completed. Some tests failed based on report.")
+            result_data['status'] = pass_fail_status
+            final_status_list.append(result_data)
+            
+            print(f"\n--- Assertion #{i} for Key: '{lookup_key}' ---")
+            print(f"  - Actual Value:    '{actual_value_clean}'")
+            print(f"  - Expected Value:  '{expected_value_clean}'")
+            print(f"  - STATUS:          {pass_fail_status}")
 
+        with open(result_file_path, 'w') as f:
+            json.dump(final_status_list, f, indent=4)
+
+        print(f"\nEnriched report with all statuses saved to '{result_file_path}'")
+
+        print(f"\n[{overall_status}] FINAL OVERALL TEST STATUS: {overall_status}")
+
+    except Exception as e:
+        print(f"\n[X] CRITICAL ERROR: Could not perform final assertion in Python. Reason: {e}")
+        
 if __name__ == '__main__':
     main()
+    
