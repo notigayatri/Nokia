@@ -1,256 +1,225 @@
-Automate Test Framework
-1. Project Overview
+# Autonomous Test Framework
 
-This project is a framework-agnostic Behavior Driven Development (BDD) test automation generator. It accepts Gherkin-based feature files and automatically generates executable test code for multiple BDD frameworks while maintaining a unified execution and output strategy.
+## Project Overview
 
-The system supports the following frameworks:
+This project is a framework-agnostic Behavior Driven Development (BDD) test automation generator.
+It accepts Gherkin-based feature files and automatically generates executable test code for multiple
+BDD frameworks while maintaining a unified execution and output strategy.
 
-Behave (Python)
+The framework avoids framework-specific assertion mechanisms and report formats.
+Instead, runtime results are extracted inside Then steps and stored in a custom,
+user-defined output structure to support agent-based validation and retries.
 
-Godog (Go)
+## Supported Frameworks
 
-Cucumber (Java)
+* Behave (Python)
+* Godog (Go)
+* Cucumber (Java)
 
-Instead of relying on framework-specific assertion mechanisms or report formats, the project focuses on extracting runtime results and storing them in a custom, user-defined output structure. This design enables agent-based validation, retry logic, and cross-framework consistency.
+## Objectives
 
-2. Objectives
+* Automatically generate step definitions from Gherkin scenarios
+* Support multiple BDD frameworks using a single input format
+* Avoid framework-dependent reporting mechanisms
+* Enable custom output parsing in Then steps
+* Facilitate agent-driven code validation and correction
+* Ensure portability across environments and frameworks
 
-Automatically generate step definitions from Gherkin scenarios
+## Project Structure
 
-Support multiple BDD frameworks using a single input format
-
-Avoid framework-dependent reporting mechanisms
-
-Enable custom output parsing in Then steps
-
-Facilitate agent-driven code validation and correction
-
-Ensure portability across environments and frameworks
-
-3. Supported Frameworks
-Framework	Language	Support Status
-Behave	Python	Supported
-Godog	Go	Supported
-Cucumber	Java	Supported
-4. Project Structure
+```
 project-root/
-│
 ├── automation_script.py
-│
 ├── input_files/
-│   └── user_provided_feature_files
-│
+│   └── (user-provided feature files)
 ├── config.yaml
-│
 ├── knowledge_base/
-│    ├── behave/
-│    ├── godog/
-│    └── cucumber/
-│
+│   ├── behave/
+│   ├── godog/
+│   └── cucumber/
 ├── requirements.txt
-├── README.md
+└── README.md
+```
 
+Framework-specific directories are created automatically when the script is executed.
 
-5. System Requirements
-5.1 General Requirements
+## System Requirements
 
-Operating System: Windows, Linux, or macOS
+### General Requirements
 
-Python version 3.9 or higher
+* Operating System: Windows, Linux, or macOS
+* Python 3.9 or higher
 
-5.2 Framework-Specific Requirements
-Behave
+### Framework-Specific Requirements
 
-Python
+#### Behave
 
-Behave library
+* Python
+* behave library
 
-Godog
+#### Godog
 
-Go version 1.20 or higher
+* Go 1.20 or higher
+* godog package
 
-Godog package
+#### Cucumber
 
-Cucumber
+* Java 11 or higher
+* Maven or Gradle
+* Cucumber dependencies
 
-Java version 11 or higher
+## Installation and Setup
 
-Maven or Gradle
+### Clone the Repository
 
-Cucumber dependencies
-
-6. Installation and Setup
-6.1 Clone the Repository
+```
 git clone <repository-url>
 cd project-root
+```
 
-6.2 Install Python Dependencies
+### Install Python Dependencies
+
+```
 pip install -r requirements.txt
+```
 
-6.3 Install Framework Dependencies
-Behave
+### Install Framework Dependencies
+
+#### Behave
+
+```
 pip install behave
+```
 
-Godog
+#### Godog
+
+```
 go install github.com/cucumber/godog/cmd/godog@latest
+```
 
-Cucumber
+#### Cucumber
 
 Add the following dependencies using Maven or Gradle:
 
-cucumber-java
+* cucumber-java
+* cucumber-junit
 
-cucumber-junit
+## Input Specifications
 
-7. Input Specifications
-7.1 Feature File
+### Feature File
 
 The input feature file must follow standard Gherkin syntax.
 
 Example:
 
+```
 Feature: Pod health check
 
-  Scenario: Check if the pod is in Running state
-    Given the mini Kube cluster is accessible
-    When I check the status of the pod with label "app=flask-api"
-    Then the pod status should be "Running"
+Scenario: Check if the pod is in Running state
+  Given the mini Kube cluster is accessible
+  When I check the status of the pod with label "app=flask-api"
+  Then the pod status should be "Running"
+```
 
-7.2 Environment Configuration File
+### Configuration File
 
-The project requires a user-provided yaml file.
+A user-provided YAML configuration file is required.
 
-The configuration file must contain three sections:
+The configuration file must contain:
 
-environment – environment details
+* environment details
+* command templates
+* expected outputs
 
-commands – executable command templates
+### Required Structure
 
-expected_outputs – expected results for validation
-
-Required Structure
-# config.yaml
-
-# Environment details
+```
 environment:
   default_namespace: "default"
 
-# Command templates
 commands:
   get_minikube_status: "minikube status"
   get_pod_json_by_label: "kubectl get pod -l {label} -o json -n {namespace}"
   get_pod_stats: "kubectl get pod -l {label} -o jsonpath='{{.items[0].status.phase}}' -n {namespace}"
 
-# Expected outputs
 expected_outputs:
   minikubeStatus: "minikube\ntype: Control Plane\nhost: Running\nkubelet: Running\napiserver: Running\nkubeconfig: Configured"
   podStatusRunning: "Running"
+```
 
-Notes
+Notes:
 
-environment contains static environment values
+* environment contains static values
+* commands contain templates with placeholders
+* expected_outputs contain expected values for validation
+* placeholders must match step parameters
 
-commands contains command templates with placeholders
+## Execution Instructions
 
-expected_outputs contains expected results used during validation
+Run the main script:
 
-Placeholders in commands must match step parameters
+```
+python automation_script.py
+```
 
-This configuration file is loaded at runtime and can be accessed within step logic.
+You will be prompted for:
 
-8. Execution Instructions
+* Input feature file path
+* Configuration file path
+* Target framework (behave, godog, cucumber)
 
-Run the main entry point:
+## Execution Flow
 
-python main.py
+1. Input file is validated or converted to Gherkin
+2. Step definitions are generated
+3. Framework-specific code is assembled
+4. Tests are executed
+5. Runtime values are extracted in Then steps
+6. Results are written to a custom output file
 
+## Output Specification
 
-The system will prompt for:
+Framework-generated reports are not used.
 
-Path to the input feature file
+Results are written to a custom JSON file.
 
-Path to the environment configuration file
+Example:
 
-Target framework (behave, godog, or cucumber)
-
-9. Execution Flow
-
-The input file is validated and converted to Gherkin format if required.
-
-Step definitions are generated dynamically.
-
-Framework-specific code is assembled using templates.
-
-Tests are executed using the selected framework.
-
-Runtime outputs are parsed inside Then steps.
-
-Results are written to a custom output file.
-
-10. Output Specification
-10.1 Custom Output File
-
-The project does not rely on framework-generated reports. Instead, execution results are written to a custom JSON file.
-
-Example output:
-
+```
 {
   "lookup_key": "podStatus",
   "expected": "Running",
   "actual": "Running",
   "status": "PASS"
 }
+```
 
-10.2 Output Design Principle
+Design principles:
 
-Then steps must not throw assertion errors.
+* Then steps do not assert
+* Then steps only extract and record values
+* Validation occurs outside test execution
 
-Then steps are responsible only for extracting and recording results.
+## Agent-Based Validation
 
-Validation and decision-making occur outside the test execution layer.
+An agent validates generated code by:
 
-11. Agent-Based Validation
+* Detecting compilation and runtime errors
+* Regenerating or correcting step logic
+* Stopping execution once validation succeeds
 
-The system is designed to work with an agent-driven execution model. The agent can:
+## Future Enhancements
 
-Validate generated code
+* Integration with external reporting tools (Allure, dashboards)
+* Web-based visualization of custom output results
+* Support for additional BDD frameworks like Gauge
 
-Detect runtime and compilation errors
-
-Regenerate or correct step logic
-
-Terminate execution when validation succeeds
-
-This approach minimizes manual intervention and improves reliability.
-
-12. Limitations
-
-Godog requires careful handling of errors in Then steps to avoid runtime crashes.
-
-Output files are overwritten per execution unless explicitly versioned.
-
-Parallel execution is not enabled by default.
-
-13. Future Enhancements
-
-Unified result aggregation across scenarios
-
-Retry mechanism for failed steps
-
-Integration with external reporting tools
-
-Web-based result visualization
-
-Support for additional BDD frameworks
-
-14. Intended Use
+## Intended Use
 
 This project is suitable for:
 
-Academic submissions
+* Academic submissions
+* Automation testing research
+* BDD framework comparison studies
+* Enterprise test automation prototyping
 
-Automation testing research
-
-BDD framework comparison studies
-
-Enterprise test automation prototyping
