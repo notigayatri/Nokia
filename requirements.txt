@@ -10,3 +10,5 @@ python-dotenv
 jinja2
 pyyaml
 openai
+
+setup cerebras key in environment variable as CEREBRAS_API_KEY
